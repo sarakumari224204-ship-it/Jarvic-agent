@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS OS</string>
+    <string name="accessibility_service_label">JARVIS OS Screen Agent</string>
+    <string name="accessibility_service_description">Lets JARVIS OS read what is on your screen and perform taps, swipes and typing on your behalf when you give a voice command. You can turn this off at any time.</string>
+
+    <string name="notif_channel_name">JARVIS Listening</string>
+    <string name="notif_channel_desc">Persistent notification while JARVIS is listening for commands</string>
+    <string name="notif_title">JARVIS is online</string>
+    <string name="notif_text">Listening for your command…</string>
+</resources>
