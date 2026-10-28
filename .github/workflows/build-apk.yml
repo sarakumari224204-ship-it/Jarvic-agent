@@ -19,18 +19,23 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
 
-      - name: Grant execute permission for gradlew
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Generate Gradle Wrapper
         run: |
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-          else
-            echo "gradlew missing – generating wrapper"
+          if [ ! -f ./gradlew ]; then
             gradle wrapper --gradle-version 8.9
-            chmod +x ./gradlew
           fi
+          chmod +x ./gradlew
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
@@ -41,3 +46,4 @@ jobs:
           name: jarvis-os-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 7
+          if-no-files-found: error
