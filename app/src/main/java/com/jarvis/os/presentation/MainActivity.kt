@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.jarvis.os.JarvisApp
 import com.jarvis.os.accessibility.JarvisAccessibilityService
+import com.jarvis.os.domain.ai.AIMode
 import com.jarvis.os.domain.model.ApiSettings
 import com.jarvis.os.domain.model.VoiceMode
 import com.jarvis.os.presentation.ui.JarvisHudScreen
@@ -40,33 +41,57 @@ class MainActivity : ComponentActivity() {
         setContent {
             JarvisTheme {
                 val settings by container.keyStore.settings.collectAsState(initial = ApiSettings())
+                val aiMode by container.keyStore.aiMode.collectAsState(initial = AIMode.AUTO)
+                val installed by container.offlineModelManager.installedModelIds.collectAsState(initial = emptySet())
+                val selectedId by container.offlineModelManager.selectedModelId.collectAsState(initial = null)
+                val downloadProgress by container.offlineModelManager.progress.collectAsState()
 
                 JarvisHudScreen(
                     settings = settings,
+                    aiMode = aiMode,
+                    installedModelIds = installed,
+                    selectedModelId = selectedId,
+                    downloadProgress = downloadProgress,
+                    freeSpaceLabel = {
+                        val free = container.offlineModelManager.freeSpaceBytes()
+                        val gb = free / (1024.0 * 1024.0 * 1024.0)
+                        "%.1f GB free".format(gb)
+                    },
                     onSaveGemini = { key, model ->
-                        lifecycleScope.launch {
-                            container.keyStore.saveGemini(key, model)
-                        }
+                        lifecycleScope.launch { container.keyStore.saveGemini(key, model) }
                     },
                     onSaveEleven = { key, voice, model ->
-                        lifecycleScope.launch {
-                            container.keyStore.saveElevenLabs(key, voice, model)
-                        }
+                        lifecycleScope.launch { container.keyStore.saveElevenLabs(key, voice, model) }
                     },
                     onSaveVoiceMode = { mode ->
+                        lifecycleScope.launch { container.keyStore.saveVoiceMode(mode) }
+                    },
+                    onSaveAiMode = { mode ->
+                        lifecycleScope.launch { container.keyStore.saveAiMode(mode) }
+                    },
+                    onDownloadModel = { id ->
+                        lifecycleScope.launch { container.offlineModelManager.download(id) }
+                    },
+                    onCancelDownload = { container.offlineModelManager.cancelDownload() },
+                    onSelectModel = { id ->
+                        lifecycleScope.launch { container.offlineModelManager.selectModel(id) }
+                    },
+                    onDeleteModel = { id ->
                         lifecycleScope.launch {
-                            container.keyStore.saveVoiceMode(mode)
+                            container.offlineAIEngine.unload()
+                            container.offlineModelManager.deleteModel(id)
                         }
                     },
                     onOpenAccessibilitySettings = {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
                     onOpenOverlaySettings = {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:$packageName")
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
                         )
-                        startActivity(intent)
                     },
                     onRequestPermissions = { requestNeededPermissions() },
                     onStartListening = { maybeStartService() },
