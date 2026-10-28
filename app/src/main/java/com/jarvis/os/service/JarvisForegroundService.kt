@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
@@ -43,6 +44,7 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             speechRecognizer.results.collectLatest { text ->
+                Log.i(TAG, "SPEECH_RECEIVED: $text")
                 handleUtterance(text)
             }
         }
@@ -61,26 +63,41 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             taskEngine.status.collectLatest { status ->
+                Log.i(TAG, "AGENT_STATE=${status.state} step=${status.step} thought=${status.lastThought}")
                 JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
             }
         }
 
         speechRecognizer.start()
+        Log.i(TAG, "SERVICE_STARTED")
     }
 
     private fun handleUtterance(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+
         val status = taskEngine.status.value
+        Log.i(TAG, "handleUtterance state=${status.state} text=$trimmed")
+
         when (status.state) {
-            AgentState.WAITING_USER -> taskEngine.provideUserReply(text)
-            AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
-                if (text.isNotBlank()) taskEngine.start(text)
+            AgentState.WAITING_USER -> {
+                Log.i(TAG, "USER_REPLY → TaskEngine")
+                taskEngine.provideUserReply(trimmed)
             }
-            else -> Unit
+            AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
+                Log.i(TAG, "TASK_STARTED: $trimmed")
+                taskEngine.start(trimmed)
+            }
+            AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {
+                // Busy – ignore extra speech to avoid stacking tasks
+                Log.i(TAG, "IGNORED_BUSY state=${status.state}")
+            }
         }
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "SERVICE_DESTROY")
         speechRecognizer.shutdown()
         taskEngine.shutdown()
         JarvisRuntime.setServiceRunning(false)
@@ -138,7 +155,7 @@ class JarvisForegroundService : LifecycleService() {
 
     private fun statusText(state: AgentState, detail: String?): String = when (state) {
         AgentState.IDLE -> getString(R.string.notif_text)
-        AgentState.THINKING -> "Thinking…"
+        AgentState.THINKING -> detail ?: "Thinking…"
         AgentState.ACTING -> "Acting on screen…"
         AgentState.SPEAKING -> detail ?: "Speaking…"
         AgentState.WAITING_USER -> detail ?: "Waiting for your reply…"
@@ -147,6 +164,7 @@ class JarvisForegroundService : LifecycleService() {
     }
 
     companion object {
+        private const val TAG = "JarvisFgService"
         private const val CHANNEL_ID = "jarvis_listening"
         private const val NOTIFICATION_ID = 42
 
