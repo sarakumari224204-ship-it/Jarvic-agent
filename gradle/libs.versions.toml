@@ -10,6 +10,7 @@ serialization = "1.7.3"
 ktor = "3.0.2"
 datastore = "1.1.1"
 junit = "4.13.2"
+llamaAndroid = "0.1.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -36,6 +37,8 @@ ktor-client-core = { group = "io.ktor", name = "ktor-client-core", version.ref =
 ktor-client-okhttp = { group = "io.ktor", name = "ktor-client-okhttp", version.ref = "ktor" }
 ktor-client-content-negotiation = { group = "io.ktor", name = "ktor-client-content-negotiation", version.ref = "ktor" }
 ktor-serialization-kotlinx-json = { group = "io.ktor", name = "ktor-serialization-kotlinx-json", version.ref = "ktor" }
+
+llama-android = { group = "dev.ffmpegkit-maintained", name = "llama-android", version.ref = "llamaAndroid" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 

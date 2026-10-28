@@ -2,11 +2,15 @@ package com.jarvis.os.di
 
 import android.content.Context
 import com.jarvis.os.data.audio.HybridSpeechSynthesizer
+import com.jarvis.os.data.offline.OfflineAIEngine
+import com.jarvis.os.data.offline.OfflineModelManager
+import com.jarvis.os.data.offline.OnlineAIEngine
 import com.jarvis.os.data.remote.ElevenLabsClient
 import com.jarvis.os.data.remote.GeminiClient
 import com.jarvis.os.data.remote.createHttpClient
 import com.jarvis.os.data.secure.ConversationStore
 import com.jarvis.os.data.secure.SecureKeyStore
+import com.jarvis.os.domain.ai.ModeRouter
 import com.jarvis.os.domain.speech.SpeechSynthesizer
 import io.ktor.client.HttpClient
 
@@ -21,5 +25,12 @@ class AppContainer(context: Context) {
     val elevenLabsClient: ElevenLabsClient by lazy { ElevenLabsClient(httpClient) }
     val speech: SpeechSynthesizer by lazy {
         HybridSpeechSynthesizer(appContext, keyStore, elevenLabsClient)
+    }
+
+    val offlineModelManager: OfflineModelManager by lazy { OfflineModelManager(appContext) }
+    val onlineAIEngine: OnlineAIEngine by lazy { OnlineAIEngine(keyStore, geminiClient) }
+    val offlineAIEngine: OfflineAIEngine by lazy { OfflineAIEngine(offlineModelManager) }
+    val modeRouter: ModeRouter by lazy {
+        ModeRouter(appContext, keyStore, onlineAIEngine, offlineAIEngine)
     }
 }

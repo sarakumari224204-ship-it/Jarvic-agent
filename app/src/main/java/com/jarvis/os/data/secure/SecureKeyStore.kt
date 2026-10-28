@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.jarvis.os.domain.ai.AIMode
 import com.jarvis.os.domain.model.ApiDefaults
 import com.jarvis.os.domain.model.ApiSettings
 import com.jarvis.os.domain.model.VoiceMode
@@ -43,6 +44,14 @@ class SecureKeyStore(context: Context) {
         }
         .distinctUntilChanged()
 
+    val aiMode: Flow<AIMode> = store.data
+        .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+        .map { prefs ->
+            runCatching { AIMode.valueOf(prefs[AI_MODE] ?: AIMode.AUTO.name) }
+                .getOrDefault(AIMode.AUTO)
+        }
+        .distinctUntilChanged()
+
     suspend fun current(): ApiSettings {
         val s = settings.first()
         val raw = store.data.first()[GEMINI_MODEL]
@@ -73,6 +82,12 @@ class SecureKeyStore(context: Context) {
         }
     }
 
+    suspend fun saveAiMode(mode: AIMode) {
+        store.edit {
+            it[AI_MODE] = mode.name
+        }
+    }
+
     suspend fun clearGemini() {
         store.edit {
             it.remove(GEMINI_KEY)
@@ -100,6 +115,7 @@ class SecureKeyStore(context: Context) {
         private val ELEVEN_VOICE = stringPreferencesKey("eleven_voice_id")
         private val ELEVEN_MODEL = stringPreferencesKey("eleven_model")
         private val VOICE_MODE = stringPreferencesKey("voice_mode")
+        private val AI_MODE = stringPreferencesKey("ai_mode")
 
         private val DEAD_OR_SLOW = setOf(
             "gemini-2.0-flash",
@@ -110,7 +126,6 @@ class SecureKeyStore(context: Context) {
             "gemini-1.5-pro-latest",
             "gemini-pro",
             "gemini-pro-vision",
-            // Prefer lite for voice speed; force migrate heavy defaults once
             "gemini-3.8-flash",
             "gemini-4-argon"
         )
