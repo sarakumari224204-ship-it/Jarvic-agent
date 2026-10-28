@@ -43,7 +43,8 @@ class JarvisForegroundService : LifecycleService() {
             speech = container.speech,
             conversationStore = container.conversationStore,
             modeRouter = container.modeRouter,
-            inputGuard = inputGuard
+            inputGuard = inputGuard,
+            contextAssembler = container.contextAssembler
         )
 
         createChannel()
@@ -91,7 +92,6 @@ class JarvisForegroundService : LifecycleService() {
                     AgentState.IDLE -> {
                         resumeJob?.cancel()
                         resumeJob = lifecycleScope.launch {
-                            // Longer than typical TTS so echo is less likely
                             delay(2200)
                             val s = taskEngine.status.value.state
                             if (s == AgentState.IDLE || s == AgentState.FINISHED || s == AgentState.FAILED) {
