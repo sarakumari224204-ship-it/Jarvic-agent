@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -30,6 +29,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,15 +38,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.jarvis.os.domain.agent.AgentState
 import com.jarvis.os.domain.model.ApiDefaults
 import com.jarvis.os.domain.model.ApiSettings
+import com.jarvis.os.runtime.JarvisRuntime
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -65,16 +69,21 @@ fun JarvisHudScreen(
     var showSetup by remember { mutableStateOf(!settings.hasGemini) }
     var showSettings by remember { mutableStateOf(false) }
 
+    val agentStatus by JarvisRuntime.agentStatus.collectAsState()
+    val isListening by JarvisRuntime.isListening.collectAsState()
+    val partial by JarvisRuntime.partialSpeech.collectAsState()
+    val serviceRunning by JarvisRuntime.serviceRunning.collectAsState()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(JarvisBackground)
     ) {
-        // Animated HUD rings
         PulsingArcVisualizer(
             modifier = Modifier
                 .size(280.dp)
-                .align(Alignment.Center)
+                .align(Alignment.Center),
+            active = isListening || agentStatus.state == AgentState.THINKING || agentStatus.state == AgentState.ACTING
         )
 
         Column(
@@ -83,7 +92,7 @@ fun JarvisHudScreen(
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(48.dp))
 
             Text(
                 text = "JARVIS OS",
@@ -96,17 +105,67 @@ fun JarvisHudScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            val statusLabel = when {
+                !settings.hasGemini -> "SETUP REQUIRED"
+                !serviceRunning -> "STANDBY"
+                agentStatus.state == AgentState.THINKING -> "THINKING"
+                agentStatus.state == AgentState.ACTING -> "ACTING"
+                agentStatus.state == AgentState.SPEAKING -> "SPEAKING"
+                agentStatus.state == AgentState.WAITING_USER -> "AWAITING REPLY"
+                agentStatus.state == AgentState.FINISHED -> "DONE"
+                agentStatus.state == AgentState.FAILED -> "FAILED"
+                isListening -> "LISTENING"
+                else -> "ONLINE"
+            }
+
             Text(
-                text = if (settings.hasGemini) "SYSTEM ONLINE" else "SETUP REQUIRED",
-                color = if (settings.hasGemini) JarvisCyan else JarvisMuted,
+                text = statusLabel,
+                color = when (agentStatus.state) {
+                    AgentState.FAILED -> Color(0xFFFF5252)
+                    AgentState.FINISHED -> JarvisCyan
+                    else -> if (settings.hasGemini) JarvisCyan else JarvisMuted
+                },
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 letterSpacing = 2.sp
             )
 
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Live thought / speech / partial
+            val liveText = when {
+                partial.isNotBlank() -> "\"$partial\""
+                !agentStatus.speech.isNullOrBlank() -> agentStatus.speech
+                !agentStatus.lastThought.isNullOrBlank() -> agentStatus.lastThought
+                agentStatus.objective != null -> agentStatus.objective
+                else -> null
+            }
+
+            if (liveText != null) {
+                Text(
+                    text = liveText,
+                    color = JarvisOnSurface.copy(alpha = 0.85f),
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                )
+            }
+
+            if (agentStatus.step > 0 && agentStatus.state != AgentState.IDLE) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "STEP ${agentStatus.step}/${agentStatus.maxSteps}",
+                    color = JarvisMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
             Spacer(modifier = Modifier.weight(1f))
 
-            // Status chips
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(bottom = 16.dp)
@@ -114,9 +173,9 @@ fun JarvisHudScreen(
                 StatusChip("GEMINI", settings.hasGemini)
                 StatusChip("VOICE", settings.hasElevenLabs)
                 StatusChip("A11Y", isAccessibilityEnabled())
+                StatusChip("MIC", serviceRunning)
             }
 
-            // Action buttons
             HudButton(
                 text = if (settings.hasGemini) "SETTINGS" else "CONFIGURE API KEYS",
                 onClick = { if (settings.hasGemini) showSettings = true else showSetup = true }
@@ -131,13 +190,20 @@ fun JarvisHudScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            HudButton(
-                text = "START LISTENING",
-                onClick = {
-                    onRequestPermissions()
-                    onStartListening()
-                }
-            )
+            if (serviceRunning) {
+                HudButton(
+                    text = "STOP LISTENING",
+                    onClick = onStopListening
+                )
+            } else {
+                HudButton(
+                    text = "START LISTENING",
+                    onClick = {
+                        onRequestPermissions()
+                        onStartListening()
+                    }
+                )
+            }
 
             Spacer(modifier = Modifier.height(32.dp))
         }
@@ -150,8 +216,7 @@ fun JarvisHudScreen(
                 showSetup = false
                 showSettings = false
             },
-            onSaveGemini = {
-                key, model ->
+            onSaveGemini = { key, model ->
                 onSaveGemini(key, model)
                 showSetup = false
                 showSettings = false
@@ -198,13 +263,13 @@ private fun HudButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PulsingArcVisualizer(modifier: Modifier = Modifier) {
+private fun PulsingArcVisualizer(modifier: Modifier = Modifier, active: Boolean = true) {
     val transition = rememberInfiniteTransition(label = "arc")
     val rotation by transition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(8000, easing = LinearEasing),
+            animation = tween(if (active) 4000 else 12000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "rotation"
@@ -213,39 +278,38 @@ private fun PulsingArcVisualizer(modifier: Modifier = Modifier) {
         initialValue = 0.7f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
+            animation = tween(if (active) 800 else 1600, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse"
     )
+
+    val alphaMul = if (active) 1f else 0.45f
 
     Canvas(modifier = modifier) {
         val cx = size.width / 2
         val cy = size.height / 2
         val baseRadius = size.minDimension / 2.2f
 
-        // Outer faint ring
         drawCircle(
-            color = JarvisCyan.copy(alpha = 0.08f * pulse),
+            color = JarvisCyan.copy(alpha = 0.08f * pulse * alphaMul),
             radius = baseRadius,
             center = Offset(cx, cy),
             style = Stroke(width = 2f)
         )
 
-        // Mid ring
         drawCircle(
-            color = JarvisCyan.copy(alpha = 0.18f * pulse),
+            color = JarvisCyan.copy(alpha = 0.18f * pulse * alphaMul),
             radius = baseRadius * 0.72f,
             center = Offset(cx, cy),
             style = Stroke(width = 1.5f)
         )
 
-        // Spinning arc segments
         val sweep = 70f
         for (i in 0 until 3) {
             val start = rotation + i * 120f
             drawArc(
-                color = JarvisCyan.copy(alpha = 0.55f),
+                color = JarvisCyan.copy(alpha = 0.55f * alphaMul),
                 startAngle = start,
                 sweepAngle = sweep,
                 useCenter = false,
@@ -255,10 +319,12 @@ private fun PulsingArcVisualizer(modifier: Modifier = Modifier) {
             )
         }
 
-        // Center core
         drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(JarvisCyan.copy(alpha = 0.35f * pulse), JarvisCyan.copy(alpha = 0f)),
+                colors = listOf(
+                    JarvisCyan.copy(alpha = 0.35f * pulse * alphaMul),
+                    JarvisCyan.copy(alpha = 0f)
+                ),
                 center = Offset(cx, cy),
                 radius = baseRadius * 0.35f
             ),
@@ -266,14 +332,13 @@ private fun PulsingArcVisualizer(modifier: Modifier = Modifier) {
             center = Offset(cx, cy)
         )
 
-        // Tiny orbiting dots
         for (i in 0 until 6) {
             val angle = Math.toRadians((rotation * 1.5f + i * 60f).toDouble())
             val r = baseRadius * 0.55f
             val x = cx + (r * cos(angle)).toFloat()
             val y = cy + (r * sin(angle)).toFloat()
             drawCircle(
-                color = JarvisCyan.copy(alpha = 0.8f),
+                color = JarvisCyan.copy(alpha = 0.8f * alphaMul),
                 radius = 3f,
                 center = Offset(x, y)
             )
@@ -373,6 +438,3 @@ private fun HudField(label: String, value: String, onChange: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth()
     )
 }
-
-// Need Color import for the SAVE button
-private val Color = androidx.compose.ui.graphics.Color
