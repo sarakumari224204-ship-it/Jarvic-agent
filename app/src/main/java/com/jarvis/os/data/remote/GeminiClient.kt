@@ -84,6 +84,7 @@ class GeminiClient(private val http: HttpClient) {
             .sorted()
     }
 
+    /** Strict JSON mode for the agent action planner. */
     suspend fun generateJson(
         apiKey: String,
         model: String,
@@ -102,6 +103,27 @@ class GeminiClient(private val http: HttpClient) {
                 temperature = 0.1f,
                 maxOutputTokens = 256,
                 responseMimeType = "application/json"
+            )
+        )
+        return generate(apiKey, model, request)
+    }
+
+    /** Plain text reply for conversation / chat (no JSON forced). */
+    suspend fun generateText(
+        apiKey: String,
+        model: String,
+        systemPrompt: String,
+        userText: String,
+        maxTokens: Int = 200
+    ): ApiResult<String> {
+        val request = GeminiRequest(
+            contents = listOf(
+                GeminiContent(role = "user", parts = listOf(GeminiPart(text = userText)))
+            ),
+            systemInstruction = GeminiContent(parts = listOf(GeminiPart(text = systemPrompt))),
+            generationConfig = GenerationConfig(
+                temperature = 0.6f,
+                maxOutputTokens = maxTokens
             )
         )
         return generate(apiKey, model, request)
