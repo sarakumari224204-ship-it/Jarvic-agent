@@ -12,18 +12,20 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.jarvis.os.JarvisApp
 import com.jarvis.os.accessibility.JarvisAccessibilityService
+import com.jarvis.os.domain.model.ApiSettings
 import com.jarvis.os.presentation.ui.JarvisHudScreen
 import com.jarvis.os.presentation.ui.JarvisTheme
 import com.jarvis.os.service.JarvisForegroundService
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        // After mic + notification permissions, try starting the service
         if (results[Manifest.permission.RECORD_AUDIO] == true) {
             maybeStartService()
         }
@@ -36,20 +38,17 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             JarvisTheme {
-                val settings by container.keyStore.settings.collectAsState(
-                    initial = com.jarvis.os.domain.model.ApiSettings()
-                )
+                val settings by container.keyStore.settings.collectAsState(initial = ApiSettings())
 
                 JarvisHudScreen(
                     settings = settings,
                     onSaveGemini = { key, model ->
-                        // launched in ViewModel-less simple way
-                        kotlinx.coroutines.MainScope().launch {
+                        lifecycleScope.launch {
                             container.keyStore.saveGemini(key, model)
                         }
                     },
                     onSaveEleven = { key, voice, model ->
-                        kotlinx.coroutines.MainScope().launch {
+                        lifecycleScope.launch {
                             container.keyStore.saveElevenLabs(key, voice, model)
                         }
                     },
@@ -65,8 +64,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onRequestPermissions = { requestNeededPermissions() },
                     onStartListening = { maybeStartService() },
-                    onStopListening = { JarvisForegroundService.stop(this) },
-                    isAccessibilityEnabled = { JarvisAccessibilityService.isEnabled(this) }
+                    onStopListening = { JarvisForegroundService.stop(this@MainActivity) },
+                    isAccessibilityEnabled = { JarvisAccessibilityService.isEnabled(this@MainActivity) }
                 )
             }
         }
@@ -100,12 +99,4 @@ class MainActivity : ComponentActivity() {
             JarvisForegroundService.start(this)
         }
     }
-}
-
-// Small helper so we don't need a full ViewModel yet
-private fun kotlinx.coroutines.MainScope(): kotlinx.coroutines.CoroutineScope =
-    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
-
-private fun kotlinx.coroutines.CoroutineScope.launch(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) {
-    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch { block() }
 }
