@@ -35,7 +35,8 @@ class JarvisForegroundService : LifecycleService() {
             keyStore = container.keyStore,
             gemini = container.geminiClient,
             speech = container.speech,
-            conversationStore = container.conversationStore
+            conversationStore = container.conversationStore,
+            modeRouter = container.modeRouter
         )
 
         createChannel()
@@ -82,15 +83,12 @@ class JarvisForegroundService : LifecycleService() {
 
         when (status.state) {
             AgentState.WAITING_USER -> {
-                Log.i(TAG, "USER_REPLY → TaskEngine")
                 taskEngine.provideUserReply(trimmed)
             }
             AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
-                Log.i(TAG, "TASK_STARTED: $trimmed")
                 taskEngine.start(trimmed)
             }
             AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {
-                // Busy – ignore extra speech to avoid stacking tasks
                 Log.i(TAG, "IGNORED_BUSY state=${status.state}")
             }
         }

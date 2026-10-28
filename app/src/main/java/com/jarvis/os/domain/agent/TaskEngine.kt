@@ -7,6 +7,9 @@ import com.jarvis.os.data.remote.ApiResult
 import com.jarvis.os.data.remote.GeminiClient
 import com.jarvis.os.data.secure.ConversationStore
 import com.jarvis.os.data.secure.SecureKeyStore
+import com.jarvis.os.domain.ai.AIEngineResult
+import com.jarvis.os.domain.ai.AIMode
+import com.jarvis.os.domain.ai.ModeRouter
 import com.jarvis.os.domain.model.AgentAction
 import com.jarvis.os.domain.model.AgentDecisionParser
 import com.jarvis.os.domain.model.ApiDefaults
@@ -24,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -31,6 +35,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 private const val MAX_STEPS = 20
 private const val GEMINI_TIMEOUT_MS = 25_000L
+private const val OFFLINE_TIMEOUT_MS = 60_000L
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -50,7 +55,8 @@ class TaskEngine(
     private val keyStore: SecureKeyStore,
     private val gemini: GeminiClient,
     private val speech: SpeechSynthesizer,
-    private val conversationStore: ConversationStore
+    private val conversationStore: ConversationStore,
+    private val modeRouter: ModeRouter? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var job: Job? = null
@@ -89,26 +95,8 @@ class TaskEngine(
     private suspend fun runLoop(objective: String) {
         Log.i(TAG, "TASK_STARTED objective=$objective")
 
+        val mode = keyStore.aiMode.first()
         val settings = keyStore.current()
-        val apiKey = settings.geminiKey
-        if (apiKey.isNullOrBlank()) {
-            speakAndFinish("Gemini API key missing hai. Settings mein daalo.", failed = true)
-            return
-        }
-
-        val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
-        Log.i(TAG, "TASK_PLANNING model=$model")
-
-        val service = JarvisAccessibilityService.instance.value
-        if (service == null) {
-            speakAndFinish("Accessibility service on nahi hai. Settings se enable karo.", failed = true)
-            return
-        }
-
-        JarvisAccessibilityService.blockedPackages = setOf(
-            service.packageName,
-            "com.android.systemui"
-        )
 
         // Immediate ack
         _status.value = AgentStatus(
@@ -119,20 +107,56 @@ class TaskEngine(
         )
         try { speech.speak("Okay, kar rahi hoon.") } catch (_: Exception) {}
 
-        // LOCAL FAST-PATH: simple "X kholo / open X" without waiting for Gemini
-        val localApp = extractOpenAppTarget(objective)
-        if (localApp != null) {
-            Log.i(TAG, "LOCAL_FAST_PATH open_app=$localApp")
-            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $localApp")
-            val result = service.launchApp(localApp)
-            Log.i(TAG, "LOCAL_OPEN success=${result.success} msg=${result.message}")
-            if (result.success) {
-                speakAndFinish("$localApp khol diya.")
-            } else {
-                speakAndFinish(result.message.ifBlank { "$localApp nahi khul paya." }, failed = true)
+        val service = JarvisAccessibilityService.instance.value
+
+        // LOCAL FAST-PATH: open app without any LLM
+        if (service != null) {
+            JarvisAccessibilityService.blockedPackages = setOf(
+                service.packageName,
+                "com.android.systemui"
+            )
+            val localApp = extractOpenAppTarget(objective)
+            if (localApp != null) {
+                Log.i(TAG, "LOCAL_FAST_PATH open_app=$localApp")
+                _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $localApp")
+                val result = service.launchApp(localApp)
+                if (result.success) speakAndFinish("$localApp khol diya.")
+                else speakAndFinish(result.message.ifBlank { "$localApp nahi khul paya." }, failed = true)
+                return
             }
+        }
+
+        // Offline-only or offline fallback conversation (no multi-step screen agent)
+        val preferOfflineChat = mode == AIMode.OFFLINE_ONLY ||
+            (mode == AIMode.AUTO && settings.geminiKey.isNullOrBlank())
+
+        if (preferOfflineChat && modeRouter != null) {
+            runOfflineConversation(objective)
             return
         }
+
+        val apiKey = settings.geminiKey
+        if (apiKey.isNullOrBlank()) {
+            if (modeRouter != null) {
+                runOfflineConversation(objective)
+                return
+            }
+            speakAndFinish("Gemini API key missing hai. Settings mein daalo, ya Offline model download karo.", failed = true)
+            return
+        }
+
+        if (service == null) {
+            // No accessibility → still answer as chat via online/offline router
+            if (modeRouter != null) {
+                runOfflineConversation(objective)
+                return
+            }
+            speakAndFinish("Accessibility service on nahi hai. Settings se enable karo.", failed = true)
+            return
+        }
+
+        val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
+        Log.i(TAG, "TASK_PLANNING model=$model mode=$mode")
 
         val history = mutableListOf<String>()
         var step = 0
@@ -155,11 +179,9 @@ class TaskEngine(
                     step = step,
                     lastThought = "Planning $step…"
                 )
-                Log.i(TAG, "TASK_PLANNING step=$step/$MAX_STEPS")
 
                 val snapshot = service.inspectScreen()
                 val screenText = snapshot?.toPrompt() ?: "[NO SCREEN]"
-
                 val conversation = conversationStore.recent(4)
                 val userPrompt = AgentPrompts.userTurn(
                     objective = objective,
@@ -186,15 +208,8 @@ class TaskEngine(
                 }
 
                 val stepResult = parsed.getOrThrow()
-                Log.i(TAG, "ACTION_SELECTED ${stepResult.action.describe()}")
-
-                _status.value = _status.value.copy(
-                    lastThought = stepResult.thought,
-                    state = AgentState.ACTING
-                )
-
+                _status.value = _status.value.copy(lastThought = stepResult.thought, state = AgentState.ACTING)
                 val actionResult = execute(service, stepResult.action)
-                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} ${actionResult.message}")
                 history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
                 _status.value = _status.value.copy(lastResult = actionResult.message)
 
@@ -218,10 +233,7 @@ class TaskEngine(
                         return
                     }
                     is AgentAction.AskUser -> {
-                        _status.value = _status.value.copy(
-                            state = AgentState.WAITING_USER,
-                            speech = action.speech
-                        )
+                        _status.value = _status.value.copy(state = AgentState.WAITING_USER, speech = action.speech)
                         speech.speak(action.speech)
                         val before = userReplies.size
                         var waited = 0
@@ -241,7 +253,6 @@ class TaskEngine(
                     else -> service.awaitUiSettled()
                 }
             }
-
             speakAndFinish("Steps limit. Simple command try karo.", failed = true)
         } catch (e: CancellationException) {
             throw e
@@ -251,7 +262,44 @@ class TaskEngine(
         }
     }
 
-    /** Detect "Chrome kholo", "open WhatsApp", "YouTube khol do" etc. without Gemini. */
+    /** Offline / simple chat path — no multi-step screen automation JSON loop. */
+    private suspend fun runOfflineConversation(objective: String) {
+        val router = modeRouter
+        if (router == null) {
+            speakAndFinish("Offline AI available nahi hai.", failed = true)
+            return
+        }
+
+        _status.value = _status.value.copy(
+            state = AgentState.THINKING,
+            lastThought = "Offline AI…"
+        )
+        conversationStore.append(ChatMessage(ChatRole.USER, objective))
+
+        val system = """You are SARA, a helpful voice assistant on Android.
+Reply in short spoken Hindi or Hinglish (1-3 sentences).
+Do not use markdown. Do not claim you performed device actions unless confirmed.""".trim()
+
+        val result = withTimeoutOrNull(OFFLINE_TIMEOUT_MS) {
+            router.generate(system, objective, maxTokens = 180)
+        }
+
+        when (result) {
+            null -> speakAndFinish("Offline model slow hai ya load nahi hua.", failed = true)
+            is AIEngineResult.Success -> speakAndFinish(result.text)
+            is AIEngineResult.Failure -> {
+                val msg = when (result.kind) {
+                    AIEngineResult.FailureKind.MODEL_NOT_INSTALLED ->
+                        "Offline AI model isn't downloaded yet. Settings se download karo."
+                    AIEngineResult.FailureKind.INSUFFICIENT_MEMORY ->
+                        result.message
+                    else -> result.message
+                }
+                speakAndFinish(msg, failed = true)
+            }
+        }
+    }
+
     private fun extractOpenAppTarget(objective: String): String? {
         val t = objective.trim().lowercase()
         val patterns = listOf(
@@ -283,7 +331,6 @@ class TaskEngine(
         return when (timed) {
             is ApiResult.Success -> timed.value
             is ApiResult.Failure -> {
-                Log.w(TAG, "Gemini FAIL: ${timed.error.message}")
                 val msg = timed.error.userMessage().replace("\"", "'")
                 "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"$msg\"}"
             }
