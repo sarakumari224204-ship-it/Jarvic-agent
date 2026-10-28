@@ -30,7 +30,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val MAX_STEPS = 25
-private const val GEMINI_TIMEOUT_MS = 45_000L
+private const val GEMINI_TIMEOUT_MS = 40_000L
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -71,6 +71,7 @@ class TaskEngine(
     fun provideUserReply(text: String) {
         if (_status.value.state == AgentState.WAITING_USER) {
             userReplies += text.trim()
+            Log.i(TAG, "USER_REPLY: $text")
         }
     }
 
@@ -86,19 +87,21 @@ class TaskEngine(
     }
 
     private suspend fun runLoop(objective: String) {
+        Log.i(TAG, "TASK_STARTED objective=$objective")
+
         val settings = keyStore.current()
         val apiKey = settings.geminiKey
         if (apiKey.isNullOrBlank()) {
-            speakAndFinish("Gemini API key is missing. Please add it in settings.", failed = true)
+            speakAndFinish("Gemini API key missing hai. Settings mein daalo.", failed = true)
             return
         }
 
-        // Always use migrated model (never dead ones)
         val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
+        Log.i(TAG, "TASK_PLANNING model=$model")
 
         val service = JarvisAccessibilityService.instance.value
         if (service == null) {
-            speakAndFinish("Accessibility service is not enabled. Please turn it on in Settings.", failed = true)
+            speakAndFinish("Accessibility service on nahi hai. Settings se enable karo.", failed = true)
             return
         }
 
@@ -106,6 +109,21 @@ class TaskEngine(
             service.packageName,
             "com.android.systemui"
         )
+
+        // Immediate acknowledgement – never leave user in silence
+        _status.value = AgentStatus(
+            state = AgentState.SPEAKING,
+            objective = objective,
+            step = 0,
+            maxSteps = MAX_STEPS,
+            speech = "Okay, kar rahi hoon.",
+            lastThought = "Acknowledged"
+        )
+        try {
+            speech.speak("Okay, kar rahi hoon.")
+        } catch (e: Exception) {
+            Log.w(TAG, "ack speak failed: ${e.message}")
+        }
 
         val history = mutableListOf<String>()
         var step = 0
@@ -115,7 +133,7 @@ class TaskEngine(
             objective = objective,
             step = 0,
             maxSteps = MAX_STEPS,
-            lastThought = "Using model $model"
+            lastThought = "Using $model"
         )
 
         conversationStore.append(ChatMessage(ChatRole.USER, objective))
@@ -126,8 +144,9 @@ class TaskEngine(
                 _status.value = _status.value.copy(
                     state = AgentState.THINKING,
                     step = step,
-                    lastThought = "Thinking with $model…"
+                    lastThought = "Planning step $step…"
                 )
+                Log.i(TAG, "TASK_PLANNING step=$step/$MAX_STEPS")
 
                 val snapshot = service.inspectScreen()
                 val screenText = snapshot?.toPrompt() ?: "[NO SCREEN] Unable to read the current screen."
@@ -147,6 +166,7 @@ class TaskEngine(
                 var parsed = AgentDecisionParser.parse(raw)
 
                 if (parsed.isFailure) {
+                    Log.w(TAG, "parse fail, repair attempt: ${parsed.exceptionOrNull()?.message}")
                     val repair = AgentPrompts.repairTurn(parsed.exceptionOrNull()?.message ?: "parse error")
                     raw = callGemini(apiKey, model, "$userPrompt\n\n$repair")
                     parsed = AgentDecisionParser.parse(raw)
@@ -154,10 +174,12 @@ class TaskEngine(
 
                 if (parsed.isFailure) {
                     history += "step $step: INVALID_REPLY (${parsed.exceptionOrNull()?.message})"
+                    Log.w(TAG, "INVALID_REPLY step=$step")
                     continue
                 }
 
                 val stepResult = parsed.getOrThrow()
+                Log.i(TAG, "ACTION_SELECTED step=$step action=${stepResult.action.describe()} thought=${stepResult.thought}")
 
                 _status.value = _status.value.copy(
                     lastThought = stepResult.thought,
@@ -165,17 +187,37 @@ class TaskEngine(
                 )
 
                 val actionResult = execute(service, stepResult.action)
+                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} msg=${actionResult.message}")
                 history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
 
                 _status.value = _status.value.copy(lastResult = actionResult.message)
 
+                // Light verification: after app launch / click, wait for UI settle
+                if (actionResult.success) {
+                    when (stepResult.action) {
+                        is AgentAction.OpenApp,
+                        is AgentAction.Click,
+                        is AgentAction.Tap,
+                        is AgentAction.Global -> {
+                            service.awaitUiSettled()
+                            Log.i(TAG, "ACTION_VERIFIED pkg=${service.currentPackage()}")
+                        }
+                        else -> Unit
+                    }
+                }
+
                 when (val action = stepResult.action) {
                     is AgentAction.Finish -> {
-                        speakAndFinish(action.speech.ifBlank { "Done." })
+                        Log.i(TAG, "TASK_COMPLETED")
+                        speakAndFinish(action.speech.ifBlank { "Ho gaya." })
                         return
                     }
                     is AgentAction.Fail -> {
-                        speakAndFinish(action.speech.ifBlank { "I could not complete the task." }, failed = true)
+                        Log.i(TAG, "TASK_FAILED: ${action.speech}")
+                        speakAndFinish(
+                            action.speech.ifBlank { "Ye kaam nahi ho paya." },
+                            failed = true
+                        )
                         return
                     }
                     is AgentAction.AskUser -> {
@@ -191,7 +233,7 @@ class TaskEngine(
                             waited += 300
                         }
                         if (userReplies.size == before) {
-                            speakAndFinish("I did not get a reply. Stopping.", failed = true)
+                            speakAndFinish("Reply nahi mila. Rok rahi hoon.", failed = true)
                             return
                         }
                     }
@@ -200,17 +242,22 @@ class TaskEngine(
                         service.awaitUiSettled()
                     }
                     else -> {
+                        if (!actionResult.success) {
+                            // Stay in loop – model can try another approach
+                            Log.w(TAG, "action failed, continuing loop")
+                        }
                         service.awaitUiSettled()
                     }
                 }
             }
 
-            speakAndFinish("I reached the step limit without finishing. Please try a simpler request.", failed = true)
+            Log.w(TAG, "TASK_FAILED step limit")
+            speakAndFinish("Zyada steps lag gaye. Simple command try karo.", failed = true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Agent loop crashed", e)
-            speakAndFinish("Something went wrong: ${e.message ?: "unknown error"}", failed = true)
+            speakAndFinish("Kuch gadbad ho gayi: ${e.message ?: "unknown"}", failed = true)
         }
     }
 
@@ -220,14 +267,17 @@ class TaskEngine(
         }
 
         if (timed == null) {
-            Log.w(TAG, "Gemini timed out after ${GEMINI_TIMEOUT_MS}ms model=$model")
-            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini took too long to reply. Please try again.\"}"
+            Log.w(TAG, "Gemini TIMEOUT model=$model after ${GEMINI_TIMEOUT_MS}ms")
+            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini reply late aa raha hai. Thodi der baad try karo.\"}"
         }
 
         return when (timed) {
-            is ApiResult.Success -> timed.value
+            is ApiResult.Success -> {
+                Log.d(TAG, "Gemini OK chars=${timed.value.length}")
+                timed.value
+            }
             is ApiResult.Failure -> {
-                Log.w(TAG, "Gemini error model=$model: ${timed.error.message}")
+                Log.w(TAG, "Gemini FAIL model=$model err=${timed.error.message}")
                 val msg = timed.error.userMessage().replace("\"", "'")
                 "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"$msg\"}"
             }
@@ -257,17 +307,27 @@ class TaskEngine(
 
     private suspend fun speakAndFinish(text: String, failed: Boolean = false) {
         _status.value = _status.value.copy(
-            state = if (failed) AgentState.FAILED else AgentState.FINISHED,
+            state = AgentState.SPEAKING,
             speech = text
         )
         if (text.isNotBlank()) {
-            _status.value = _status.value.copy(state = AgentState.SPEAKING)
-            speech.speak(text)
+            try {
+                speech.speak(text)
+            } catch (e: Exception) {
+                Log.w(TAG, "speak failed: ${e.message}")
+            }
             conversationStore.append(ChatMessage(ChatRole.ASSISTANT, text))
         }
         _status.value = _status.value.copy(
-            state = if (failed) AgentState.FAILED else AgentState.FINISHED
+            state = if (failed) AgentState.FAILED else AgentState.FINISHED,
+            speech = text
         )
+        Log.i(TAG, if (failed) "TASK_FAILED done" else "TASK_COMPLETED done")
+        // Return to IDLE so next speech can start a new task
+        delay(400)
+        if (_status.value.state == AgentState.FINISHED || _status.value.state == AgentState.FAILED) {
+            _status.value = _status.value.copy(state = AgentState.IDLE)
+        }
     }
 
     companion object {
