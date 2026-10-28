@@ -19,5 +19,7 @@ class AppContainer(context: Context) {
     val conversationStore: ConversationStore by lazy { ConversationStore(appContext) }
     val geminiClient: GeminiClient by lazy { GeminiClient(httpClient) }
     val elevenLabsClient: ElevenLabsClient by lazy { ElevenLabsClient(httpClient) }
-    val speech: SpeechSynthesizer by lazy { HybridSpeechSynthesizer(appContext, keyStore, elevenLabsClient) }
+    val speech: SpeechSynthesizer by lazy {
+        HybridSpeechSynthesizer(appContext, keyStore, elevenLabsClient)
+    }
 }
