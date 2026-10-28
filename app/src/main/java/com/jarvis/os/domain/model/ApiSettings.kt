@@ -14,6 +14,18 @@ object ApiDefaults {
     )
 
     const val ELEVENLABS_MODEL = "eleven_flash_v2_5"
+
+    /** Default voice routing: try online first, fall back offline. */
+    const val VOICE_MODE = VoiceMode.AUTO
+}
+
+enum class VoiceMode {
+    /** Prefer ElevenLabs when online + configured; always fall back to native TTS. */
+    AUTO,
+    /** Force ElevenLabs only (still falls back if it fails). */
+    ONLINE,
+    /** Always use device native TTS (no network). */
+    OFFLINE
 }
 
 data class ApiSettings(
@@ -21,11 +33,12 @@ data class ApiSettings(
     val geminiModel: String = ApiDefaults.GEMINI_MODEL,
     val elevenLabsKey: String? = null,
     val elevenLabsVoiceId: String? = null,
-    val elevenLabsModel: String = ApiDefaults.ELEVENLABS_MODEL
+    val elevenLabsModel: String = ApiDefaults.ELEVENLABS_MODEL,
+    val voiceMode: VoiceMode = ApiDefaults.VOICE_MODE
 ) {
     val hasGemini: Boolean get() = !geminiKey.isNullOrBlank()
     val hasElevenLabs: Boolean get() = !elevenLabsKey.isNullOrBlank() && !elevenLabsVoiceId.isNullOrBlank()
 
     override fun toString(): String =
-        "ApiSettings(geminiModel=$geminiModel, hasGemini=$hasGemini, hasElevenLabs=$hasElevenLabs)"
+        "ApiSettings(geminiModel=$geminiModel, hasGemini=$hasGemini, hasElevenLabs=$hasElevenLabs, voiceMode=$voiceMode)"
 }

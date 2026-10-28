@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.jarvis.os.domain.model.ApiDefaults
 import com.jarvis.os.domain.model.ApiSettings
+import com.jarvis.os.domain.model.VoiceMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -27,12 +28,17 @@ class SecureKeyStore(context: Context) {
         .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
         .map { prefs ->
             val rawModel = prefs[GEMINI_MODEL] ?: ApiDefaults.GEMINI_MODEL
+            val voiceMode = runCatching {
+                VoiceMode.valueOf(prefs[VOICE_MODE] ?: VoiceMode.AUTO.name)
+            }.getOrDefault(VoiceMode.AUTO)
+
             ApiSettings(
                 geminiKey = prefs[GEMINI_KEY]?.let(cipher::decrypt),
                 geminiModel = migrateModel(rawModel),
                 elevenLabsKey = prefs[ELEVEN_KEY]?.let(cipher::decrypt),
                 elevenLabsVoiceId = prefs[ELEVEN_VOICE],
-                elevenLabsModel = prefs[ELEVEN_MODEL] ?: ApiDefaults.ELEVENLABS_MODEL
+                elevenLabsModel = prefs[ELEVEN_MODEL] ?: ApiDefaults.ELEVENLABS_MODEL,
+                voiceMode = voiceMode
             )
         }
         .distinctUntilChanged()
@@ -58,6 +64,12 @@ class SecureKeyStore(context: Context) {
             it[ELEVEN_KEY] = cipher.encrypt(apiKey.trim())
             it[ELEVEN_VOICE] = voiceId.trim()
             it[ELEVEN_MODEL] = model.trim().ifEmpty { ApiDefaults.ELEVENLABS_MODEL }
+        }
+    }
+
+    suspend fun saveVoiceMode(mode: VoiceMode) {
+        store.edit {
+            it[VOICE_MODE] = mode.name
         }
     }
 
@@ -87,6 +99,7 @@ class SecureKeyStore(context: Context) {
         private val ELEVEN_KEY = stringPreferencesKey("eleven_key_enc")
         private val ELEVEN_VOICE = stringPreferencesKey("eleven_voice_id")
         private val ELEVEN_MODEL = stringPreferencesKey("eleven_model")
+        private val VOICE_MODE = stringPreferencesKey("voice_mode")
 
         private val DEAD_OR_SLOW = setOf(
             "gemini-2.0-flash",
