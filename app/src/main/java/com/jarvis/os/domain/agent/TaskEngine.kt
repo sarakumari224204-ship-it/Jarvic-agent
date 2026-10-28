@@ -2,6 +2,7 @@ package com.jarvis.os.domain.agent
 
 import android.util.Log
 import com.jarvis.os.accessibility.ActionResult
+import com.jarvis.os.accessibility.GlobalCommand
 import com.jarvis.os.accessibility.JarvisAccessibilityService
 import com.jarvis.os.data.remote.ApiResult
 import com.jarvis.os.data.remote.GeminiClient
@@ -33,9 +34,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-private const val MAX_STEPS = 20
-private const val GEMINI_TIMEOUT_MS = 25_000L
-private const val OFFLINE_TIMEOUT_MS = 60_000L
+private const val MAX_STEPS = 12
+private const val GEMINI_TIMEOUT_MS = 18_000L
+private const val OFFLINE_TIMEOUT_MS = 45_000L
+private const val OVERALL_TASK_TIMEOUT_MS = 40_000L
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -70,7 +72,13 @@ class TaskEngine(
         job?.cancel()
         userReplies.clear()
         job = scope.launch {
-            runLoop(objective.trim())
+            val finished = withTimeoutOrNull(OVERALL_TASK_TIMEOUT_MS) {
+                runLoop(objective.trim())
+            }
+            if (finished == null) {
+                Log.e(TAG, "TASK_FAILED overall timeout")
+                speakAndFinish("Time out ho gaya. Dobara try karo.", failed = true)
+            }
         }
     }
 
@@ -98,39 +106,42 @@ class TaskEngine(
         val mode = keyStore.aiMode.first()
         val settings = keyStore.current()
 
-        // Immediate ack
+        // Immediate acknowledgement — never silent
         _status.value = AgentStatus(
             state = AgentState.SPEAKING,
             objective = objective,
             speech = "Okay, kar rahi hoon.",
             lastThought = "ack"
         )
-        try { speech.speak("Okay, kar rahi hoon.") } catch (_: Exception) {}
+        try {
+            speech.speak("Okay, kar rahi hoon.")
+        } catch (e: Exception) {
+            Log.w(TAG, "ack speak failed: ${e.message}")
+        }
 
         val service = JarvisAccessibilityService.instance.value
-
-        // LOCAL FAST-PATH: open app without any LLM
         if (service != null) {
             JarvisAccessibilityService.blockedPackages = setOf(
                 service.packageName,
                 "com.android.systemui"
             )
-            val localApp = extractOpenAppTarget(objective)
-            if (localApp != null) {
-                Log.i(TAG, "LOCAL_FAST_PATH open_app=$localApp")
-                _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $localApp")
-                val result = service.launchApp(localApp)
-                if (result.success) speakAndFinish("$localApp khol diya.")
-                else speakAndFinish(result.message.ifBlank { "$localApp nahi khul paya." }, failed = true)
+        }
+
+        // ── Local deterministic commands (no API) ──────────────────────────
+        if (service != null) {
+            val local = tryLocalCommand(service, objective)
+            if (local != null) {
+                Log.i(TAG, "LOCAL_COMMAND handled")
+                speakAndFinish(local.text, failed = !local.ok)
                 return
             }
         }
 
-        // Offline-only or offline fallback conversation (no multi-step screen agent)
-        val preferOfflineChat = mode == AIMode.OFFLINE_ONLY ||
+        // Offline / no key → conversation path
+        val preferOffline = mode == AIMode.OFFLINE_ONLY ||
             (mode == AIMode.AUTO && settings.geminiKey.isNullOrBlank())
 
-        if (preferOfflineChat && modeRouter != null) {
+        if (preferOffline && modeRouter != null) {
             runOfflineConversation(objective)
             return
         }
@@ -141,12 +152,14 @@ class TaskEngine(
                 runOfflineConversation(objective)
                 return
             }
-            speakAndFinish("Gemini API key missing hai. Settings mein daalo, ya Offline model download karo.", failed = true)
+            speakAndFinish(
+                "Gemini API key missing. Settings mein daalo, ya Offline model download karo.",
+                failed = true
+            )
             return
         }
 
         if (service == null) {
-            // No accessibility → still answer as chat via online/offline router
             if (modeRouter != null) {
                 runOfflineConversation(objective)
                 return
@@ -179,6 +192,7 @@ class TaskEngine(
                     step = step,
                     lastThought = "Planning $step…"
                 )
+                Log.i(TAG, "TASK_PLANNING step=$step/$MAX_STEPS")
 
                 val snapshot = service.inspectScreen()
                 val screenText = snapshot?.toPrompt() ?: "[NO SCREEN]"
@@ -203,13 +217,21 @@ class TaskEngine(
                 }
 
                 if (parsed.isFailure) {
+                    Log.w(TAG, "PARSE_FAIL step=$step")
                     history += "step $step: INVALID_REPLY"
                     continue
                 }
 
                 val stepResult = parsed.getOrThrow()
-                _status.value = _status.value.copy(lastThought = stepResult.thought, state = AgentState.ACTING)
+                Log.i(TAG, "ACTION_SELECTED ${stepResult.action.describe()}")
+
+                _status.value = _status.value.copy(
+                    lastThought = stepResult.thought,
+                    state = AgentState.ACTING
+                )
+
                 val actionResult = execute(service, stepResult.action)
+                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} ${actionResult.message}")
                 history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
                 _status.value = _status.value.copy(lastResult = actionResult.message)
 
@@ -225,19 +247,24 @@ class TaskEngine(
 
                 when (val action = stepResult.action) {
                     is AgentAction.Finish -> {
+                        Log.i(TAG, "TASK_COMPLETED")
                         speakAndFinish(action.speech.ifBlank { "Ho gaya." })
                         return
                     }
                     is AgentAction.Fail -> {
+                        Log.i(TAG, "TASK_FAILED speech=${action.speech}")
                         speakAndFinish(action.speech.ifBlank { "Ye kaam nahi ho paya." }, failed = true)
                         return
                     }
                     is AgentAction.AskUser -> {
-                        _status.value = _status.value.copy(state = AgentState.WAITING_USER, speech = action.speech)
+                        _status.value = _status.value.copy(
+                            state = AgentState.WAITING_USER,
+                            speech = action.speech
+                        )
                         speech.speak(action.speech)
                         val before = userReplies.size
                         var waited = 0
-                        while (userReplies.size == before && waited < 45_000 && scope.isActive) {
+                        while (userReplies.size == before && waited < 30_000 && scope.isActive) {
                             delay(300)
                             waited += 300
                         }
@@ -247,22 +274,87 @@ class TaskEngine(
                         }
                     }
                     AgentAction.Wait -> {
-                        delay(500)
+                        delay(400)
                         service.awaitUiSettled()
                     }
                     else -> service.awaitUiSettled()
                 }
             }
-            speakAndFinish("Steps limit. Simple command try karo.", failed = true)
+
+            Log.i(TAG, "TASK_FAILED steps limit")
+            speakAndFinish("Steps limit. Simple command try karo jaise Chrome kholo.", failed = true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Agent crashed", e)
+            Log.e(TAG, "TASK_FAILED exception", e)
             speakAndFinish("Error: ${e.message ?: "unknown"}", failed = true)
         }
     }
 
-    /** Offline / simple chat path — no multi-step screen automation JSON loop. */
+    private data class LocalResult(val ok: Boolean, val text: String)
+
+    /** Deterministic phone commands without Gemini. */
+    private suspend fun tryLocalCommand(service: JarvisAccessibilityService, objective: String): LocalResult? {
+        val t = objective.trim().lowercase()
+
+        // Home
+        if (t.matches(Regex(".*\\b(home|homescreen|ghar|होम)\\b.*")) &&
+            (t.contains("jao") || t.contains("jaao") || t.contains("go") || t.contains("khol") || t.length < 12)
+        ) {
+            Log.i(TAG, "LOCAL home")
+            val r = service.globalAction(GlobalCommand.HOME)
+            return LocalResult(r.success, if (r.success) "Home screen par aa gaye." else r.message)
+        }
+
+        // Back
+        if (t.matches(Regex(".*\\b(back|peeche|पीछे|वापस)\\b.*")) && t.length < 24) {
+            Log.i(TAG, "LOCAL back")
+            val r = service.globalAction(GlobalCommand.BACK)
+            return LocalResult(r.success, if (r.success) "Back kar diya." else r.message)
+        }
+
+        // Open app
+        val appTarget = extractOpenAppTarget(objective)
+        if (appTarget != null) {
+            Log.i(TAG, "LOCAL_FAST_PATH open_app=$appTarget")
+            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $appTarget")
+            val result = service.launchApp(appTarget)
+            Log.i(TAG, "ACTION_VERIFIED success=${result.success} msg=${result.message}")
+            return LocalResult(
+                result.success,
+                if (result.success) "$appTarget khol diya." else result.message.ifBlank { "$appTarget nahi khul paya." }
+            )
+        }
+
+        // Settings → WiFi style
+        if ((t.contains("wifi") || t.contains("wi-fi") || t.contains("वाईफाई")) &&
+            (t.contains("setting") || t.contains("khol") || t.contains("open"))
+        ) {
+            Log.i(TAG, "LOCAL wifi settings")
+            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "WiFi settings")
+            val open = service.launchApp("Settings")
+            if (!open.success) return LocalResult(false, open.message)
+            service.awaitUiSettled(500, 3000)
+            val snap = service.inspectScreen()
+            val wifiNode = snap?.nodes?.firstOrNull { n ->
+                val blob = listOfNotNull(n.text, n.contentDescription, n.viewId).joinToString(" ").lowercase()
+                blob.contains("wifi") || blob.contains("wi-fi") || blob.contains("network") || blob.contains("internet")
+            }
+            if (wifiNode != null) {
+                val click = service.clickNode(wifiNode.id)
+                service.awaitUiSettled()
+                Log.i(TAG, "ACTION_VERIFIED wifi click success=${click.success}")
+                return LocalResult(
+                    click.success,
+                    if (click.success) "WiFi settings khol diye." else "Settings khule, WiFi option nahi mila."
+                )
+            }
+            return LocalResult(true, "Settings khol diye. WiFi option screen par dikh nahi raha.")
+        }
+
+        return null
+    }
+
     private suspend fun runOfflineConversation(objective: String) {
         val router = modeRouter
         if (router == null) {
@@ -270,10 +362,7 @@ class TaskEngine(
             return
         }
 
-        _status.value = _status.value.copy(
-            state = AgentState.THINKING,
-            lastThought = "Offline AI…"
-        )
+        _status.value = _status.value.copy(state = AgentState.THINKING, lastThought = "Offline AI…")
         conversationStore.append(ChatMessage(ChatRole.USER, objective))
 
         val system = """You are SARA, a helpful voice assistant on Android.
@@ -281,18 +370,24 @@ Reply in short spoken Hindi or Hinglish (1-3 sentences).
 Do not use markdown. Do not claim you performed device actions unless confirmed.""".trim()
 
         val result = withTimeoutOrNull(OFFLINE_TIMEOUT_MS) {
-            router.generate(system, objective, maxTokens = 180)
+            router.generate(system, objective, maxTokens = 160)
         }
 
         when (result) {
-            null -> speakAndFinish("Offline model slow hai ya load nahi hua.", failed = true)
-            is AIEngineResult.Success -> speakAndFinish(result.text)
+            null -> {
+                Log.e(TAG, "TASK_FAILED offline timeout")
+                speakAndFinish("Offline model slow hai ya load nahi hua.", failed = true)
+            }
+            is AIEngineResult.Success -> {
+                Log.i(TAG, "TASK_COMPLETED offline")
+                speakAndFinish(result.text)
+            }
             is AIEngineResult.Failure -> {
+                Log.e(TAG, "TASK_FAILED offline ${result.kind} ${result.message}")
                 val msg = when (result.kind) {
                     AIEngineResult.FailureKind.MODEL_NOT_INSTALLED ->
                         "Offline AI model isn't downloaded yet. Settings se download karo."
-                    AIEngineResult.FailureKind.INSUFFICIENT_MEMORY ->
-                        result.message
+                    AIEngineResult.FailureKind.INSUFFICIENT_MEMORY -> result.message
                     else -> result.message
                 }
                 speakAndFinish(msg, failed = true)
@@ -312,11 +407,24 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
             val name = m.groupValues[1].trim()
                 .removePrefix("the ")
                 .removeSuffix(" app")
+                .removeSuffix(" application")
                 .trim()
-            if (name.length in 2..40 && !name.contains("settings") && !name.contains("wifi")) {
+            if (name.length in 2..40 &&
+                !name.contains("settings") &&
+                !name.contains("wifi") &&
+                !name.contains("setting")
+            ) {
                 return name
             }
         }
+        // Bare app names: "chrome", "youtube"
+        val known = listOf(
+            "chrome", "youtube", "whatsapp", "gmail", "maps", "instagram",
+            "facebook", "twitter", "telegram", "snapchat", "spotify", "netflix",
+            "camera", "gallery", "photos", "phone", "contacts", "messages", "calculator"
+        )
+        val bare = t.trim()
+        if (bare in known) return bare
         return null
     }
 
@@ -331,6 +439,7 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
         return when (timed) {
             is ApiResult.Success -> timed.value
             is ApiResult.Failure -> {
+                Log.w(TAG, "Gemini FAIL: ${timed.error.message}")
                 val msg = timed.error.userMessage().replace("\"", "'")
                 "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"$msg\"}"
             }
@@ -361,17 +470,21 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
     private suspend fun speakAndFinish(text: String, failed: Boolean = false) {
         _status.value = _status.value.copy(state = AgentState.SPEAKING, speech = text)
         if (text.isNotBlank()) {
-            try { speech.speak(text) } catch (_: Exception) {}
+            try {
+                speech.speak(text)
+            } catch (e: Exception) {
+                Log.w(TAG, "final speak failed: ${e.message}")
+            }
             conversationStore.append(ChatMessage(ChatRole.ASSISTANT, text))
         }
         _status.value = _status.value.copy(
             state = if (failed) AgentState.FAILED else AgentState.FINISHED,
             speech = text
         )
-        delay(300)
-        if (_status.value.state == AgentState.FINISHED || _status.value.state == AgentState.FAILED) {
-            _status.value = _status.value.copy(state = AgentState.IDLE)
-        }
+        // Brief hold so service can pause STT during TTS, then return to IDLE/listening
+        delay(400)
+        _status.value = _status.value.copy(state = AgentState.IDLE)
+        Log.i(TAG, if (failed) "TASK_FAILED done" else "TASK_COMPLETED done")
     }
 
     companion object {
