@@ -16,6 +16,7 @@ import com.jarvis.os.R
 import com.jarvis.os.domain.agent.AgentState
 import com.jarvis.os.domain.agent.TaskEngine
 import com.jarvis.os.presentation.MainActivity
+import com.jarvis.os.runtime.JarvisRuntime
 import com.jarvis.os.speech.ContinuousSpeechRecognizer
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -38,17 +39,29 @@ class JarvisForegroundService : LifecycleService() {
 
         createChannel()
         startForegroundCompat()
+        JarvisRuntime.setServiceRunning(true)
 
-        // Forward final transcripts to the agent
         lifecycleScope.launch {
             speechRecognizer.results.collectLatest { text ->
                 handleUtterance(text)
             }
         }
 
-        // Keep notification text in sync with agent state
+        lifecycleScope.launch {
+            speechRecognizer.isListening.collectLatest { listening ->
+                JarvisRuntime.updateListening(listening)
+            }
+        }
+
+        lifecycleScope.launch {
+            speechRecognizer.partialText.collectLatest { partial ->
+                JarvisRuntime.updatePartial(partial)
+            }
+        }
+
         lifecycleScope.launch {
             taskEngine.status.collectLatest { status ->
+                JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
             }
         }
@@ -63,15 +76,14 @@ class JarvisForegroundService : LifecycleService() {
             AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
                 if (text.isNotBlank()) taskEngine.start(text)
             }
-            else -> {
-                // Agent is busy; ignore or could queue
-            }
+            else -> Unit
         }
     }
 
     override fun onDestroy() {
         speechRecognizer.shutdown()
         taskEngine.shutdown()
+        JarvisRuntime.setServiceRunning(false)
         super.onDestroy()
     }
 
