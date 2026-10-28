@@ -1,1 +1,0 @@
-Write access test - if you see this, permissions are working.
