@@ -29,7 +29,7 @@ class AppContainer(context: Context) {
 
     val offlineModelManager: OfflineModelManager by lazy { OfflineModelManager(appContext) }
     val onlineAIEngine: OnlineAIEngine by lazy { OnlineAIEngine(keyStore, geminiClient) }
-    val offlineAIEngine: OfflineAIEngine by lazy { OfflineAIEngine(offlineModelManager) }
+    val offlineAIEngine: OfflineAIEngine by lazy { OfflineAIEngine(appContext, offlineModelManager) }
     val modeRouter: ModeRouter by lazy {
         ModeRouter(appContext, keyStore, onlineAIEngine, offlineAIEngine)
     }
