@@ -95,7 +95,7 @@ fun JarvisHudScreen(
             Spacer(modifier = Modifier.height(48.dp))
 
             Text(
-                text = "JARVIS OS",
+                text = "SARA AI",
                 color = JarvisCyan,
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
@@ -132,7 +132,6 @@ fun JarvisHudScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Live thought / speech / partial
             val liveText = when {
                 partial.isNotBlank() -> "\"$partial\""
                 !agentStatus.speech.isNullOrBlank() -> agentStatus.speech
@@ -354,7 +353,12 @@ private fun SetupDialog(
     onSaveEleven: (String, String, String) -> Unit
 ) {
     var geminiKey by remember { mutableStateOf(initial.geminiKey.orEmpty()) }
-    var geminiModel by remember { mutableStateOf(initial.geminiModel) }
+    // Force upgrade away from shut-down models
+    val defaultModel = when (initial.geminiModel) {
+        "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro" -> ApiDefaults.GEMINI_MODEL
+        else -> initial.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL }
+    }
+    var geminiModel by remember { mutableStateOf(defaultModel) }
     var elevenKey by remember { mutableStateOf(initial.elevenLabsKey.orEmpty()) }
     var elevenVoice by remember { mutableStateOf(initial.elevenLabsVoiceId.orEmpty()) }
     var elevenModel by remember { mutableStateOf(initial.elevenLabsModel) }
@@ -378,7 +382,15 @@ private fun SetupDialog(
 
             HudField("Gemini API Key", geminiKey) { geminiKey = it }
             Spacer(modifier = Modifier.height(8.dp))
-            HudField("Gemini Model", geminiModel) { geminiModel = it }
+            HudField("Gemini Model (e.g. gemini-3.8-flash)", geminiModel) { geminiModel = it }
+
+            Text(
+                text = "Working: gemini-3.8-flash · 3.6-flash · 2.5-flash · 4-argon",
+                color = JarvisMuted,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(top = 4.dp)
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
             Text("ElevenLabs (optional)", color = JarvisMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
