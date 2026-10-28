@@ -16,7 +16,7 @@ object ApiDefaults {
     const val ELEVENLABS_MODEL = "eleven_flash_v2_5"
 
     /** Default voice routing: try online first, fall back offline. */
-    const val VOICE_MODE = VoiceMode.AUTO
+    val VOICE_MODE: VoiceMode = VoiceMode.AUTO
 }
 
 enum class VoiceMode {
