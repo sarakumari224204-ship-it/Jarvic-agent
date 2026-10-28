@@ -67,6 +67,20 @@ class JarvisForegroundService : LifecycleService() {
                 Log.i(TAG, "AGENT_STATE=${status.state} step=${status.step} thought=${status.lastThought}")
                 JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
+
+                // Pause STT while working so TTS is not picked up as a new command
+                when (status.state) {
+                    AgentState.THINKING,
+                    AgentState.ACTING,
+                    AgentState.SPEAKING,
+                    AgentState.WAITING_USER -> speechRecognizer.pause()
+                    AgentState.IDLE,
+                    AgentState.FINISHED,
+                    AgentState.FAILED -> {
+                        // Small delay so last TTS tail is not captured
+                        speechRecognizer.resume()
+                    }
+                }
             }
         }
 
@@ -86,6 +100,8 @@ class JarvisForegroundService : LifecycleService() {
                 taskEngine.provideUserReply(trimmed)
             }
             AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
+                // Pause immediately so ack TTS is not re-heard
+                speechRecognizer.pause()
                 taskEngine.start(trimmed)
             }
             AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {

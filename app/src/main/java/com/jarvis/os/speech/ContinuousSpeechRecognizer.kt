@@ -21,11 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Continuous listening via Android SpeechRecognizer.
  *
- * Rules:
- * - Transient errors (NO_MATCH, SPEECH_TIMEOUT, CLIENT, NETWORK…) → restart
- * - Only ERROR_INSUFFICIENT_PERMISSIONS permanently stops listening
- * - No overlapping startListening calls
- * - No restart after stop()/shutdown()
+ * Critical: call [pause] while TTS speaks or a task runs, then [resume].
+ * Otherwise mic hears TTS → ERROR_CLIENT / garbage commands.
  */
 class ContinuousSpeechRecognizer(context: Context) {
 
@@ -34,6 +31,7 @@ class ContinuousSpeechRecognizer(context: Context) {
 
     private var recognizer: SpeechRecognizer? = null
     private val running = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
     private val starting = AtomicBoolean(false)
 
     private val _isListening = MutableStateFlow(false)
@@ -46,9 +44,11 @@ class ContinuousSpeechRecognizer(context: Context) {
     val results: SharedFlow<String> = _results.asSharedFlow()
 
     private val restartRunnable = Runnable {
-        if (running.get()) {
+        if (running.get() && !paused.get()) {
             Log.d(TAG, "restartRunnable → createAndStart")
             createAndStart()
+        } else {
+            Log.d(TAG, "restartRunnable skipped running=${running.get()} paused=${paused.get()}")
         }
     }
 
@@ -59,15 +59,46 @@ class ContinuousSpeechRecognizer(context: Context) {
         }
         if (!running.compareAndSet(false, true)) {
             Log.d(TAG, "start() ignored – already running")
+            // If was paused, resume
+            if (paused.get()) resume()
             return
         }
+        paused.set(false)
         Log.i(TAG, "SPEECH_ENGINE_START")
+        mainHandler.post { createAndStart() }
+    }
+
+    /** Stop mic while TTS / task runs so assistant voice is not re-recognized. */
+    fun pause() {
+        if (!running.get()) return
+        if (!paused.compareAndSet(false, true)) return
+        Log.i(TAG, "SPEECH_ENGINE_PAUSE")
+        mainHandler.removeCallbacks(restartRunnable)
+        mainHandler.post {
+            destroyRecognizer()
+            _isListening.value = false
+            _partial.value = ""
+            starting.set(false)
+        }
+    }
+
+    fun resume() {
+        if (!running.get()) return
+        if (!paused.compareAndSet(true, false)) {
+            // already not paused
+            if (recognizer == null && running.get()) {
+                mainHandler.post { createAndStart() }
+            }
+            return
+        }
+        Log.i(TAG, "SPEECH_ENGINE_RESUME")
         mainHandler.post { createAndStart() }
     }
 
     fun stop() {
         Log.i(TAG, "SPEECH_ENGINE_STOP")
         running.set(false)
+        paused.set(false)
         mainHandler.removeCallbacks(restartRunnable)
         mainHandler.post {
             destroyRecognizer()
@@ -80,7 +111,10 @@ class ContinuousSpeechRecognizer(context: Context) {
     fun shutdown() = stop()
 
     private fun createAndStart() {
-        if (!running.get()) return
+        if (!running.get() || paused.get()) {
+            Log.d(TAG, "createAndStart abort running=${running.get()} paused=${paused.get()}")
+            return
+        }
         if (!starting.compareAndSet(false, true)) {
             Log.d(TAG, "createAndStart skipped – already starting")
             return
@@ -97,11 +131,11 @@ class ContinuousSpeechRecognizer(context: Context) {
             } catch (e: Exception) {
                 Log.e(TAG, "startListening threw", e)
                 _isListening.value = false
-                scheduleRestart(600L)
+                scheduleRestart(700L)
             }
         } catch (e: Exception) {
             Log.e(TAG, "createAndStart failed", e)
-            scheduleRestart(800L)
+            scheduleRestart(900L)
         } finally {
             starting.set(false)
         }
@@ -119,7 +153,7 @@ class ContinuousSpeechRecognizer(context: Context) {
     }
 
     private fun scheduleRestart(delayMs: Long = 400L) {
-        if (!running.get()) return
+        if (!running.get() || paused.get()) return
         mainHandler.removeCallbacks(restartRunnable)
         mainHandler.postDelayed(restartRunnable, delayMs)
         Log.d(TAG, "scheduled restart in ${delayMs}ms")
@@ -130,9 +164,9 @@ class ContinuousSpeechRecognizer(context: Context) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            // Prefer device locale; also help Hindi/Hinglish devices
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
-            // Prefer online when available but allow offline engines too
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
         }
     }
@@ -181,14 +215,10 @@ class ContinuousSpeechRecognizer(context: Context) {
 
             when (error) {
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                    // Hard stop – user must grant mic permission
                     Log.e(TAG, "Mic permission missing – stopping engine")
                     running.set(false)
                 }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    // Back off a bit longer
-                    scheduleRestart(900L)
-                }
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> scheduleRestart(1000L)
                 SpeechRecognizer.ERROR_CLIENT,
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
@@ -197,11 +227,8 @@ class ContinuousSpeechRecognizer(context: Context) {
                 SpeechRecognizer.ERROR_SERVER,
                 SpeechRecognizer.ERROR_SERVER_DISCONNECTED,
                 SpeechRecognizer.ERROR_AUDIO,
-                SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> {
-                    // Transient – always recover
-                    scheduleRestart(450L)
-                }
-                else -> scheduleRestart(600L)
+                SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> scheduleRestart(500L)
+                else -> scheduleRestart(700L)
             }
         }
 
@@ -212,12 +239,13 @@ class ContinuousSpeechRecognizer(context: Context) {
             _partial.value = ""
             if (best.isNotEmpty()) {
                 Log.i(TAG, "SPEECH_RECEIVED: $best")
-                val emitted = _results.tryEmit(best)
-                if (!emitted) Log.w(TAG, "results buffer full – dropped: $best")
+                if (!_results.tryEmit(best)) {
+                    Log.w(TAG, "results buffer full – dropped: $best")
+                }
             } else {
                 Log.d(TAG, "onResults empty")
             }
-            scheduleRestart(350L)
+            scheduleRestart(400L)
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
