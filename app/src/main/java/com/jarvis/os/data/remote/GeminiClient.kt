@@ -98,7 +98,11 @@ class GeminiClient(private val http: HttpClient) {
         val request = GeminiRequest(
             contents = listOf(GeminiContent(role = "user", parts = parts)),
             systemInstruction = GeminiContent(parts = listOf(GeminiPart(text = systemPrompt))),
-            generationConfig = GenerationConfig(temperature = 0.2f, responseMimeType = "application/json")
+            generationConfig = GenerationConfig(
+                temperature = 0.1f,
+                maxOutputTokens = 256,
+                responseMimeType = "application/json"
+            )
         )
         return generate(apiKey, model, request)
     }
@@ -148,7 +152,7 @@ class GeminiClient(private val http: HttpClient) {
     private companion object {
         const val BASE = "https://generativelanguage.googleapis.com/v1beta"
         const val KEY_HEADER = "x-goog-api-key"
-        const val MAX_RETRIES = 2
-        const val RETRY_BASE_MS = 700L
+        const val MAX_RETRIES = 1
+        const val RETRY_BASE_MS = 400L
     }
 }

@@ -29,8 +29,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-private const val MAX_STEPS = 25
-private const val GEMINI_TIMEOUT_MS = 40_000L
+private const val MAX_STEPS = 20
+private const val GEMINI_TIMEOUT_MS = 25_000L
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -110,19 +110,28 @@ class TaskEngine(
             "com.android.systemui"
         )
 
-        // Immediate acknowledgement – never leave user in silence
+        // Immediate ack
         _status.value = AgentStatus(
             state = AgentState.SPEAKING,
             objective = objective,
-            step = 0,
-            maxSteps = MAX_STEPS,
             speech = "Okay, kar rahi hoon.",
-            lastThought = "Acknowledged"
+            lastThought = "ack"
         )
-        try {
-            speech.speak("Okay, kar rahi hoon.")
-        } catch (e: Exception) {
-            Log.w(TAG, "ack speak failed: ${e.message}")
+        try { speech.speak("Okay, kar rahi hoon.") } catch (_: Exception) {}
+
+        // LOCAL FAST-PATH: simple "X kholo / open X" without waiting for Gemini
+        val localApp = extractOpenAppTarget(objective)
+        if (localApp != null) {
+            Log.i(TAG, "LOCAL_FAST_PATH open_app=$localApp")
+            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $localApp")
+            val result = service.launchApp(localApp)
+            Log.i(TAG, "LOCAL_OPEN success=${result.success} msg=${result.message}")
+            if (result.success) {
+                speakAndFinish("$localApp khol diya.")
+            } else {
+                speakAndFinish(result.message.ifBlank { "$localApp nahi khul paya." }, failed = true)
+            }
+            return
         }
 
         val history = mutableListOf<String>()
@@ -144,14 +153,14 @@ class TaskEngine(
                 _status.value = _status.value.copy(
                     state = AgentState.THINKING,
                     step = step,
-                    lastThought = "Planning step $step…"
+                    lastThought = "Planning $step…"
                 )
                 Log.i(TAG, "TASK_PLANNING step=$step/$MAX_STEPS")
 
                 val snapshot = service.inspectScreen()
-                val screenText = snapshot?.toPrompt() ?: "[NO SCREEN] Unable to read the current screen."
+                val screenText = snapshot?.toPrompt() ?: "[NO SCREEN]"
 
-                val conversation = conversationStore.recent(6)
+                val conversation = conversationStore.recent(4)
                 val userPrompt = AgentPrompts.userTurn(
                     objective = objective,
                     step = step,
@@ -166,20 +175,18 @@ class TaskEngine(
                 var parsed = AgentDecisionParser.parse(raw)
 
                 if (parsed.isFailure) {
-                    Log.w(TAG, "parse fail, repair attempt: ${parsed.exceptionOrNull()?.message}")
                     val repair = AgentPrompts.repairTurn(parsed.exceptionOrNull()?.message ?: "parse error")
-                    raw = callGemini(apiKey, model, "$userPrompt\n\n$repair")
+                    raw = callGemini(apiKey, model, "$userPrompt\n$repair")
                     parsed = AgentDecisionParser.parse(raw)
                 }
 
                 if (parsed.isFailure) {
-                    history += "step $step: INVALID_REPLY (${parsed.exceptionOrNull()?.message})"
-                    Log.w(TAG, "INVALID_REPLY step=$step")
+                    history += "step $step: INVALID_REPLY"
                     continue
                 }
 
                 val stepResult = parsed.getOrThrow()
-                Log.i(TAG, "ACTION_SELECTED step=$step action=${stepResult.action.describe()} thought=${stepResult.thought}")
+                Log.i(TAG, "ACTION_SELECTED ${stepResult.action.describe()}")
 
                 _status.value = _status.value.copy(
                     lastThought = stepResult.thought,
@@ -187,37 +194,27 @@ class TaskEngine(
                 )
 
                 val actionResult = execute(service, stepResult.action)
-                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} msg=${actionResult.message}")
+                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} ${actionResult.message}")
                 history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
-
                 _status.value = _status.value.copy(lastResult = actionResult.message)
 
-                // Light verification: after app launch / click, wait for UI settle
                 if (actionResult.success) {
                     when (stepResult.action) {
                         is AgentAction.OpenApp,
                         is AgentAction.Click,
                         is AgentAction.Tap,
-                        is AgentAction.Global -> {
-                            service.awaitUiSettled()
-                            Log.i(TAG, "ACTION_VERIFIED pkg=${service.currentPackage()}")
-                        }
+                        is AgentAction.Global -> service.awaitUiSettled()
                         else -> Unit
                     }
                 }
 
                 when (val action = stepResult.action) {
                     is AgentAction.Finish -> {
-                        Log.i(TAG, "TASK_COMPLETED")
                         speakAndFinish(action.speech.ifBlank { "Ho gaya." })
                         return
                     }
                     is AgentAction.Fail -> {
-                        Log.i(TAG, "TASK_FAILED: ${action.speech}")
-                        speakAndFinish(
-                            action.speech.ifBlank { "Ye kaam nahi ho paya." },
-                            failed = true
-                        )
+                        speakAndFinish(action.speech.ifBlank { "Ye kaam nahi ho paya." }, failed = true)
                         return
                     }
                     is AgentAction.AskUser -> {
@@ -228,56 +225,65 @@ class TaskEngine(
                         speech.speak(action.speech)
                         val before = userReplies.size
                         var waited = 0
-                        while (userReplies.size == before && waited < 60_000 && scope.isActive) {
+                        while (userReplies.size == before && waited < 45_000 && scope.isActive) {
                             delay(300)
                             waited += 300
                         }
                         if (userReplies.size == before) {
-                            speakAndFinish("Reply nahi mila. Rok rahi hoon.", failed = true)
+                            speakAndFinish("Reply nahi mila.", failed = true)
                             return
                         }
                     }
                     AgentAction.Wait -> {
-                        delay(800)
+                        delay(500)
                         service.awaitUiSettled()
                     }
-                    else -> {
-                        if (!actionResult.success) {
-                            // Stay in loop – model can try another approach
-                            Log.w(TAG, "action failed, continuing loop")
-                        }
-                        service.awaitUiSettled()
-                    }
+                    else -> service.awaitUiSettled()
                 }
             }
 
-            Log.w(TAG, "TASK_FAILED step limit")
-            speakAndFinish("Zyada steps lag gaye. Simple command try karo.", failed = true)
+            speakAndFinish("Steps limit. Simple command try karo.", failed = true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Agent loop crashed", e)
-            speakAndFinish("Kuch gadbad ho gayi: ${e.message ?: "unknown"}", failed = true)
+            Log.e(TAG, "Agent crashed", e)
+            speakAndFinish("Error: ${e.message ?: "unknown"}", failed = true)
         }
+    }
+
+    /** Detect "Chrome kholo", "open WhatsApp", "YouTube khol do" etc. without Gemini. */
+    private fun extractOpenAppTarget(objective: String): String? {
+        val t = objective.trim().lowercase()
+        val patterns = listOf(
+            Regex("""(?:open|launch|start)\s+(.+)"""),
+            Regex("""(.+?)\s*(?:kholo|khol\s*do|khol\s*dena|khol\s*diya|open\s*karo|start\s*karo)"""),
+            Regex("""(.+?)\s*(?:खोलो|खोल\s*दो)""")
+        )
+        for (p in patterns) {
+            val m = p.find(t) ?: continue
+            val name = m.groupValues[1].trim()
+                .removePrefix("the ")
+                .removeSuffix(" app")
+                .trim()
+            if (name.length in 2..40 && !name.contains("settings") && !name.contains("wifi")) {
+                return name
+            }
+        }
+        return null
     }
 
     private suspend fun callGemini(apiKey: String, model: String, userText: String): String {
         val timed = withTimeoutOrNull(GEMINI_TIMEOUT_MS) {
             gemini.generateJson(apiKey, model, AgentPrompts.SYSTEM, userText)
         }
-
         if (timed == null) {
-            Log.w(TAG, "Gemini TIMEOUT model=$model after ${GEMINI_TIMEOUT_MS}ms")
-            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini reply late aa raha hai. Thodi der baad try karo.\"}"
+            Log.w(TAG, "Gemini TIMEOUT model=$model")
+            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini slow hai. Model change karke try karo.\"}"
         }
-
         return when (timed) {
-            is ApiResult.Success -> {
-                Log.d(TAG, "Gemini OK chars=${timed.value.length}")
-                timed.value
-            }
+            is ApiResult.Success -> timed.value
             is ApiResult.Failure -> {
-                Log.w(TAG, "Gemini FAIL model=$model err=${timed.error.message}")
+                Log.w(TAG, "Gemini FAIL: ${timed.error.message}")
                 val msg = timed.error.userMessage().replace("\"", "'")
                 "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"$msg\"}"
             }
@@ -306,25 +312,16 @@ class TaskEngine(
     }
 
     private suspend fun speakAndFinish(text: String, failed: Boolean = false) {
-        _status.value = _status.value.copy(
-            state = AgentState.SPEAKING,
-            speech = text
-        )
+        _status.value = _status.value.copy(state = AgentState.SPEAKING, speech = text)
         if (text.isNotBlank()) {
-            try {
-                speech.speak(text)
-            } catch (e: Exception) {
-                Log.w(TAG, "speak failed: ${e.message}")
-            }
+            try { speech.speak(text) } catch (_: Exception) {}
             conversationStore.append(ChatMessage(ChatRole.ASSISTANT, text))
         }
         _status.value = _status.value.copy(
             state = if (failed) AgentState.FAILED else AgentState.FINISHED,
             speech = text
         )
-        Log.i(TAG, if (failed) "TASK_FAILED done" else "TASK_COMPLETED done")
-        // Return to IDLE so next speech can start a new task
-        delay(400)
+        delay(300)
         if (_status.value.state == AgentState.FINISHED || _status.value.state == AgentState.FAILED) {
             _status.value = _status.value.copy(state = AgentState.IDLE)
         }

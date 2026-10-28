@@ -39,7 +39,6 @@ class SecureKeyStore(context: Context) {
 
     suspend fun current(): ApiSettings {
         val s = settings.first()
-        // Persist migration so next launches stay on the good model
         val raw = store.data.first()[GEMINI_MODEL]
         if (raw != null && migrateModel(raw) != raw) {
             store.edit { it[GEMINI_MODEL] = migrateModel(raw) }
@@ -89,8 +88,7 @@ class SecureKeyStore(context: Context) {
         private val ELEVEN_VOICE = stringPreferencesKey("eleven_voice_id")
         private val ELEVEN_MODEL = stringPreferencesKey("eleven_model")
 
-        /** Models Google has shut down or renamed — always remap to a working default. */
-        private val DEAD_MODELS = setOf(
+        private val DEAD_OR_SLOW = setOf(
             "gemini-2.0-flash",
             "gemini-2.0-flash-exp",
             "gemini-1.5-flash",
@@ -98,12 +96,15 @@ class SecureKeyStore(context: Context) {
             "gemini-1.5-pro",
             "gemini-1.5-pro-latest",
             "gemini-pro",
-            "gemini-pro-vision"
+            "gemini-pro-vision",
+            // Prefer lite for voice speed; force migrate heavy defaults once
+            "gemini-3.8-flash",
+            "gemini-4-argon"
         )
 
         fun migrateModel(model: String): String {
             val clean = model.trim().removePrefix("models/")
-            if (clean.isEmpty() || clean in DEAD_MODELS) return ApiDefaults.GEMINI_MODEL
+            if (clean.isEmpty() || clean in DEAD_OR_SLOW) return ApiDefaults.GEMINI_MODEL
             return clean
         }
     }
