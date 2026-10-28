@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +51,7 @@ import androidx.compose.ui.window.Dialog
 import com.jarvis.os.domain.agent.AgentState
 import com.jarvis.os.domain.model.ApiDefaults
 import com.jarvis.os.domain.model.ApiSettings
+import com.jarvis.os.domain.model.VoiceMode
 import com.jarvis.os.runtime.JarvisRuntime
 import kotlin.math.cos
 import kotlin.math.sin
@@ -59,6 +61,7 @@ fun JarvisHudScreen(
     settings: ApiSettings,
     onSaveGemini: (key: String, model: String) -> Unit,
     onSaveEleven: (key: String, voiceId: String, model: String) -> Unit,
+    onSaveVoiceMode: (VoiceMode) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onRequestPermissions: () -> Unit,
@@ -170,7 +173,7 @@ fun JarvisHudScreen(
                 modifier = Modifier.padding(bottom = 16.dp)
             ) {
                 StatusChip("GEMINI", settings.hasGemini)
-                StatusChip("VOICE", settings.hasElevenLabs)
+                StatusChip("VOICE", settings.hasElevenLabs || settings.voiceMode == VoiceMode.OFFLINE)
                 StatusChip("A11Y", isAccessibilityEnabled())
                 StatusChip("MIC", serviceRunning)
             }
@@ -220,7 +223,8 @@ fun JarvisHudScreen(
                 showSetup = false
                 showSettings = false
             },
-            onSaveEleven = onSaveEleven
+            onSaveEleven = onSaveEleven,
+            onSaveVoiceMode = onSaveVoiceMode
         )
     }
 }
@@ -350,10 +354,10 @@ private fun SetupDialog(
     initial: ApiSettings,
     onDismiss: () -> Unit,
     onSaveGemini: (String, String) -> Unit,
-    onSaveEleven: (String, String, String) -> Unit
+    onSaveEleven: (String, String, String) -> Unit,
+    onSaveVoiceMode: (VoiceMode) -> Unit
 ) {
     var geminiKey by remember { mutableStateOf(initial.geminiKey.orEmpty()) }
-    // Force upgrade away from shut-down models
     val defaultModel = when (initial.geminiModel) {
         "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro" -> ApiDefaults.GEMINI_MODEL
         else -> initial.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL }
@@ -362,6 +366,7 @@ private fun SetupDialog(
     var elevenKey by remember { mutableStateOf(initial.elevenLabsKey.orEmpty()) }
     var elevenVoice by remember { mutableStateOf(initial.elevenLabsVoiceId.orEmpty()) }
     var elevenModel by remember { mutableStateOf(initial.elevenLabsModel) }
+    var voiceMode by remember { mutableStateOf(initial.voiceMode) }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -382,14 +387,39 @@ private fun SetupDialog(
 
             HudField("Gemini API Key", geminiKey) { geminiKey = it }
             Spacer(modifier = Modifier.height(8.dp))
-            HudField("Gemini Model (e.g. gemini-3.8-flash)", geminiModel) { geminiModel = it }
+            HudField("Gemini Model (e.g. gemini-3.5-flash-lite)", geminiModel) { geminiModel = it }
 
             Text(
-                text = "Working: gemini-3.8-flash · 3.6-flash · 2.5-flash · 4-argon",
+                text = "Working: gemini-3.5-flash-lite · 2.5-flash · 3.6-flash",
                 color = JarvisMuted,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(top = 4.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("VOICE MODE", color = JarvisMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                VoiceModeChip("Auto", VoiceMode.AUTO, voiceMode) { voiceMode = it }
+                VoiceModeChip("Online", VoiceMode.ONLINE, voiceMode) { voiceMode = it }
+                VoiceModeChip("Offline", VoiceMode.OFFLINE, voiceMode) { voiceMode = it }
+            }
+
+            Text(
+                text = when (voiceMode) {
+                    VoiceMode.AUTO -> "Online natural voice when available, else device TTS"
+                    VoiceMode.ONLINE -> "Prefer ElevenLabs (still falls back if it fails)"
+                    VoiceMode.OFFLINE -> "Always use device TTS (no internet needed)"
+                },
+                color = JarvisMuted,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(top = 6.dp)
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -411,6 +441,7 @@ private fun SetupDialog(
                 }
                 Button(
                     onClick = {
+                        onSaveVoiceMode(voiceMode)
                         if (geminiKey.isNotBlank()) {
                             onSaveGemini(geminiKey, geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
                         }
@@ -429,6 +460,31 @@ private fun SetupDialog(
             }
         }
     }
+}
+
+@Composable
+private fun VoiceModeChip(
+    label: String,
+    mode: VoiceMode,
+    selected: VoiceMode,
+    onSelect: (VoiceMode) -> Unit
+) {
+    val isSelected = selected == mode
+    Text(
+        text = label,
+        color = if (isSelected) Color.Black else JarvisCyan,
+        fontSize = 12.sp,
+        fontFamily = FontFamily.Monospace,
+        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier
+            .background(
+                if (isSelected) JarvisCyan else Color.Transparent,
+                RoundedCornerShape(6.dp)
+            )
+            .border(1.dp, JarvisCyan.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+            .clickable { onSelect(mode) }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    )
 }
 
 @Composable

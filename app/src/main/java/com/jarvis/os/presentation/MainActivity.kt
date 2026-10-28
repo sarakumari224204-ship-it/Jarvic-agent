@@ -16,6 +16,7 @@ import androidx.lifecycle.lifecycleScope
 import com.jarvis.os.JarvisApp
 import com.jarvis.os.accessibility.JarvisAccessibilityService
 import com.jarvis.os.domain.model.ApiSettings
+import com.jarvis.os.domain.model.VoiceMode
 import com.jarvis.os.presentation.ui.JarvisHudScreen
 import com.jarvis.os.presentation.ui.JarvisTheme
 import com.jarvis.os.service.JarvisForegroundService
@@ -50,6 +51,11 @@ class MainActivity : ComponentActivity() {
                     onSaveEleven = { key, voice, model ->
                         lifecycleScope.launch {
                             container.keyStore.saveElevenLabs(key, voice, model)
+                        }
+                    },
+                    onSaveVoiceMode = { mode ->
+                        lifecycleScope.launch {
+                            container.keyStore.saveVoiceMode(mode)
                         }
                     },
                     onOpenAccessibilitySettings = {
