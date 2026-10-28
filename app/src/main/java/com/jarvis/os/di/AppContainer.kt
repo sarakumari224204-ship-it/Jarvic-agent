@@ -2,6 +2,8 @@ package com.jarvis.os.di
 
 import android.content.Context
 import com.jarvis.os.data.audio.HybridSpeechSynthesizer
+import com.jarvis.os.data.memory.KnowledgeIndexer
+import com.jarvis.os.data.memory.MemoryStore
 import com.jarvis.os.data.offline.OfflineAIEngine
 import com.jarvis.os.data.offline.OfflineModelManager
 import com.jarvis.os.data.offline.OnlineAIEngine
@@ -11,6 +13,7 @@ import com.jarvis.os.data.remote.createHttpClient
 import com.jarvis.os.data.secure.ConversationStore
 import com.jarvis.os.data.secure.SecureKeyStore
 import com.jarvis.os.domain.ai.ModeRouter
+import com.jarvis.os.domain.memory.ContextAssembler
 import com.jarvis.os.domain.speech.SpeechSynthesizer
 import io.ktor.client.HttpClient
 
@@ -33,4 +36,10 @@ class AppContainer(context: Context) {
     val modeRouter: ModeRouter by lazy {
         ModeRouter(appContext, keyStore, onlineAIEngine, offlineAIEngine)
     }
+
+    val memoryStore: MemoryStore by lazy { MemoryStore(appContext) }
+    val knowledgeIndexer: KnowledgeIndexer by lazy {
+        KnowledgeIndexer(appContext, memoryStore, httpClient)
+    }
+    val contextAssembler: ContextAssembler by lazy { ContextAssembler(memoryStore) }
 }
