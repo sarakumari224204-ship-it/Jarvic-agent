@@ -9,6 +9,7 @@ import com.jarvis.os.data.secure.ConversationStore
 import com.jarvis.os.data.secure.SecureKeyStore
 import com.jarvis.os.domain.model.AgentAction
 import com.jarvis.os.domain.model.AgentDecisionParser
+import com.jarvis.os.domain.model.ApiDefaults
 import com.jarvis.os.domain.model.ChatMessage
 import com.jarvis.os.domain.model.ChatRole
 import com.jarvis.os.domain.model.describe
@@ -26,8 +27,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val MAX_STEPS = 25
+private const val GEMINI_TIMEOUT_MS = 45_000L
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -90,6 +93,9 @@ class TaskEngine(
             return
         }
 
+        // Always use migrated model (never dead ones)
+        val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
+
         val service = JarvisAccessibilityService.instance.value
         if (service == null) {
             speakAndFinish("Accessibility service is not enabled. Please turn it on in Settings.", failed = true)
@@ -108,7 +114,8 @@ class TaskEngine(
             state = AgentState.THINKING,
             objective = objective,
             step = 0,
-            maxSteps = MAX_STEPS
+            maxSteps = MAX_STEPS,
+            lastThought = "Using model $model"
         )
 
         conversationStore.append(ChatMessage(ChatRole.USER, objective))
@@ -116,7 +123,11 @@ class TaskEngine(
         try {
             while (scope.isActive && step < MAX_STEPS) {
                 step++
-                _status.value = _status.value.copy(state = AgentState.THINKING, step = step)
+                _status.value = _status.value.copy(
+                    state = AgentState.THINKING,
+                    step = step,
+                    lastThought = "Thinking with $model…"
+                )
 
                 val snapshot = service.inspectScreen()
                 val screenText = snapshot?.toPrompt() ?: "[NO SCREEN] Unable to read the current screen."
@@ -132,12 +143,12 @@ class TaskEngine(
                     screen = screenText
                 )
 
-                var raw = callGemini(apiKey, settings.geminiModel, userPrompt)
+                var raw = callGemini(apiKey, model, userPrompt)
                 var parsed = AgentDecisionParser.parse(raw)
 
                 if (parsed.isFailure) {
                     val repair = AgentPrompts.repairTurn(parsed.exceptionOrNull()?.message ?: "parse error")
-                    raw = callGemini(apiKey, settings.geminiModel, "$userPrompt\n\n$repair")
+                    raw = callGemini(apiKey, model, "$userPrompt\n\n$repair")
                     parsed = AgentDecisionParser.parse(raw)
                 }
 
@@ -204,11 +215,21 @@ class TaskEngine(
     }
 
     private suspend fun callGemini(apiKey: String, model: String, userText: String): String {
-        return when (val result = gemini.generateJson(apiKey, model, AgentPrompts.SYSTEM, userText)) {
-            is ApiResult.Success -> result.value
+        val timed = withTimeoutOrNull(GEMINI_TIMEOUT_MS) {
+            gemini.generateJson(apiKey, model, AgentPrompts.SYSTEM, userText)
+        }
+
+        if (timed == null) {
+            Log.w(TAG, "Gemini timed out after ${GEMINI_TIMEOUT_MS}ms model=$model")
+            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini took too long to reply. Please try again.\"}"
+        }
+
+        return when (timed) {
+            is ApiResult.Success -> timed.value
             is ApiResult.Failure -> {
-                Log.w(TAG, "Gemini error: ${result.error.message}")
-                "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"${result.error.userMessage()}\"}"
+                Log.w(TAG, "Gemini error model=$model: ${timed.error.message}")
+                val msg = timed.error.userMessage().replace("\"", "'")
+                "{\"thought\":\"API error\",\"action\":\"fail\",\"speech\":\"$msg\"}"
             }
         }
     }

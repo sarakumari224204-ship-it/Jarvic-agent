@@ -26,9 +26,10 @@ class SecureKeyStore(context: Context) {
     val settings: Flow<ApiSettings> = store.data
         .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
         .map { prefs ->
+            val rawModel = prefs[GEMINI_MODEL] ?: ApiDefaults.GEMINI_MODEL
             ApiSettings(
                 geminiKey = prefs[GEMINI_KEY]?.let(cipher::decrypt),
-                geminiModel = prefs[GEMINI_MODEL] ?: ApiDefaults.GEMINI_MODEL,
+                geminiModel = migrateModel(rawModel),
                 elevenLabsKey = prefs[ELEVEN_KEY]?.let(cipher::decrypt),
                 elevenLabsVoiceId = prefs[ELEVEN_VOICE],
                 elevenLabsModel = prefs[ELEVEN_MODEL] ?: ApiDefaults.ELEVENLABS_MODEL
@@ -36,12 +37,20 @@ class SecureKeyStore(context: Context) {
         }
         .distinctUntilChanged()
 
-    suspend fun current(): ApiSettings = settings.first()
+    suspend fun current(): ApiSettings {
+        val s = settings.first()
+        // Persist migration so next launches stay on the good model
+        val raw = store.data.first()[GEMINI_MODEL]
+        if (raw != null && migrateModel(raw) != raw) {
+            store.edit { it[GEMINI_MODEL] = migrateModel(raw) }
+        }
+        return s
+    }
 
     suspend fun saveGemini(apiKey: String, model: String) {
         store.edit {
             it[GEMINI_KEY] = cipher.encrypt(apiKey.trim())
-            it[GEMINI_MODEL] = model.trim().ifEmpty { ApiDefaults.GEMINI_MODEL }
+            it[GEMINI_MODEL] = migrateModel(model.trim().ifEmpty { ApiDefaults.GEMINI_MODEL })
         }
     }
 
@@ -73,11 +82,29 @@ class SecureKeyStore(context: Context) {
         clearElevenLabs()
     }
 
-    private companion object {
-        val GEMINI_KEY = stringPreferencesKey("gemini_key_enc")
-        val GEMINI_MODEL = stringPreferencesKey("gemini_model")
-        val ELEVEN_KEY = stringPreferencesKey("eleven_key_enc")
-        val ELEVEN_VOICE = stringPreferencesKey("eleven_voice_id")
-        val ELEVEN_MODEL = stringPreferencesKey("eleven_model")
+    companion object {
+        private val GEMINI_KEY = stringPreferencesKey("gemini_key_enc")
+        private val GEMINI_MODEL = stringPreferencesKey("gemini_model")
+        private val ELEVEN_KEY = stringPreferencesKey("eleven_key_enc")
+        private val ELEVEN_VOICE = stringPreferencesKey("eleven_voice_id")
+        private val ELEVEN_MODEL = stringPreferencesKey("eleven_model")
+
+        /** Models Google has shut down or renamed — always remap to a working default. */
+        private val DEAD_MODELS = setOf(
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-exp",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro",
+            "gemini-1.5-pro-latest",
+            "gemini-pro",
+            "gemini-pro-vision"
+        )
+
+        fun migrateModel(model: String): String {
+            val clean = model.trim().removePrefix("models/")
+            if (clean.isEmpty() || clean in DEAD_MODELS) return ApiDefaults.GEMINI_MODEL
+            return clean
+        }
     }
 }
