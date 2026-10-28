@@ -44,7 +44,7 @@ jobs:
       - name: Install ImageMagick
         run: sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
 
-      - name: Generate launcher icons from photo
+      - name: Generate Sara AI launcher icons
         run: |
           mkdir -p app/src/main/res/mipmap-mdpi \
                    app/src/main/res/mipmap-hdpi \
@@ -53,9 +53,17 @@ jobs:
                    app/src/main/res/mipmap-xxxhdpi \
                    app/src/main/res/mipmap-anydpi-v26 \
                    app/src/main/res/values
-          cat app/src/main/res/raw/icon_parts/part*.txt | tr -d '\n' | base64 -d > /tmp/icon_src.jpg
-          # Square crop + enhance for launcher
-          convert /tmp/icon_src.jpg -resize 512x512^ -gravity center -extent 512x512 -quality 95 /tmp/icon_src.png
+
+          # Anime-inspired purple gradient icon with glowing S
+          convert -size 512x512 \
+            radial-gradient:'#C084FC'-'#1A0B2E' \
+            -gravity center \
+            -font DejaVu-Sans-Bold -pointsize 280 -fill '#E9D5FF' \
+            -annotate +0+20 'S' \
+            -fill 'none' -stroke '#00E5FF' -strokewidth 8 \
+            -draw "circle 256,256 256,40" \
+            /tmp/icon_src.png
+
           for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
             dens=${pair%:*}
             size=${pair#*:}
@@ -66,12 +74,14 @@ jobs:
               app/src/main/res/mipmap-$dens/ic_launcher_round.png
             cp app/src/main/res/mipmap-$dens/ic_launcher.png app/src/main/res/mipmap-$dens/ic_launcher_foreground.png
           done
+
           cat > app/src/main/res/values/ic_launcher_background.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <color name="ic_launcher_background">#1A0B2E</color>
           </resources>
           EOF
+
           cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -79,6 +89,7 @@ jobs:
               <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
           </adaptive-icon>
           EOF
+
           cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -86,6 +97,7 @@ jobs:
               <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
           </adaptive-icon>
           EOF
+
           ls -la app/src/main/res/mipmap-xxxhdpi/
 
       - name: Generate Gradle Wrapper
