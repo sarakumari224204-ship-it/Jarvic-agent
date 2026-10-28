@@ -15,6 +15,7 @@ import androidx.lifecycle.lifecycleScope
 import com.jarvis.os.JarvisApp
 import com.jarvis.os.R
 import com.jarvis.os.domain.agent.AgentState
+import com.jarvis.os.domain.agent.InputGuard
 import com.jarvis.os.domain.agent.TaskEngine
 import com.jarvis.os.presentation.MainActivity
 import com.jarvis.os.runtime.JarvisRuntime
@@ -28,18 +29,21 @@ class JarvisForegroundService : LifecycleService() {
 
     private lateinit var speechRecognizer: ContinuousSpeechRecognizer
     private lateinit var taskEngine: TaskEngine
+    private lateinit var inputGuard: InputGuard
     private var resumeJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         val container = (application as JarvisApp).container
         speechRecognizer = ContinuousSpeechRecognizer(this)
+        inputGuard = InputGuard()
         taskEngine = TaskEngine(
             keyStore = container.keyStore,
             gemini = container.geminiClient,
             speech = container.speech,
             conversationStore = container.conversationStore,
-            modeRouter = container.modeRouter
+            modeRouter = container.modeRouter,
+            inputGuard = inputGuard
         )
 
         createChannel()
@@ -48,7 +52,7 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             speechRecognizer.results.collectLatest { text ->
-                Log.i(TAG, "SPEECH_RECEIVED: $text")
+                Log.i(TAG, "SPEECH_RECEIVED source=stt text=$text")
                 handleUtterance(text)
             }
         }
@@ -67,7 +71,10 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             taskEngine.status.collectLatest { status ->
-                Log.i(TAG, "AGENT_STATE=${status.state} step=${status.step} thought=${status.lastThought}")
+                Log.i(
+                    TAG,
+                    "STATE_TRANSITION state=${status.state} taskId=${status.taskId} step=${status.step} thought=${status.lastThought}"
+                )
                 JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
 
@@ -82,14 +89,12 @@ class JarvisForegroundService : LifecycleService() {
                     AgentState.FINISHED,
                     AgentState.FAILED,
                     AgentState.IDLE -> {
-                        // Wait for TTS to finish before opening the mic again
                         resumeJob?.cancel()
                         resumeJob = lifecycleScope.launch {
-                            delay(1800)
-                            if (taskEngine.status.value.state == AgentState.IDLE ||
-                                taskEngine.status.value.state == AgentState.FINISHED ||
-                                taskEngine.status.value.state == AgentState.FAILED
-                            ) {
+                            // Longer than typical TTS so echo is less likely
+                            delay(2200)
+                            val s = taskEngine.status.value.state
+                            if (s == AgentState.IDLE || s == AgentState.FINISHED || s == AgentState.FAILED) {
                                 Log.i(TAG, "STT_RESUME after task")
                                 speechRecognizer.resume()
                             }
@@ -107,20 +112,33 @@ class JarvisForegroundService : LifecycleService() {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
+        val reject = inputGuard.rejectReason(trimmed)
+        if (reject != null) {
+            Log.i(TAG, "INPUT_REJECTED reason=$reject text=$trimmed")
+            return
+        }
+
         val status = taskEngine.status.value
-        Log.i(TAG, "handleUtterance state=${status.state} text=$trimmed")
+        Log.i(TAG, "handleUtterance state=${status.state} taskId=${status.taskId} text=$trimmed")
 
         when (status.state) {
             AgentState.WAITING_USER -> {
+                inputGuard.markAccepted(trimmed)
                 taskEngine.provideUserReply(trimmed)
             }
             AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
+                if (taskEngine.isBusy()) {
+                    Log.i(TAG, "INPUT_REJECTED reason=busy text=$trimmed")
+                    return
+                }
+                inputGuard.markAccepted(trimmed)
                 resumeJob?.cancel()
                 speechRecognizer.pause()
-                taskEngine.start(trimmed)
+                val id = taskEngine.start(trimmed)
+                Log.i(TAG, "TASK_DISPATCH id=$id text=$trimmed")
             }
             AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {
-                Log.i(TAG, "IGNORED_BUSY state=${status.state}")
+                Log.i(TAG, "IGNORED_BUSY state=${status.state} text=$trimmed")
             }
         }
     }
@@ -186,9 +204,9 @@ class JarvisForegroundService : LifecycleService() {
     private fun statusText(state: AgentState, detail: String?): String = when (state) {
         AgentState.IDLE -> getString(R.string.notif_text)
         AgentState.THINKING -> detail ?: "Thinking…"
-        AgentState.ACTING -> "Acting on screen…"
+        AgentState.ACTING -> "Acting…"
         AgentState.SPEAKING -> detail ?: "Speaking…"
-        AgentState.WAITING_USER -> detail ?: "Waiting for your reply…"
+        AgentState.WAITING_USER -> detail ?: "Waiting…"
         AgentState.FINISHED -> detail ?: "Done."
         AgentState.FAILED -> detail ?: "Failed."
     }
@@ -199,8 +217,7 @@ class JarvisForegroundService : LifecycleService() {
         private const val NOTIFICATION_ID = 42
 
         fun start(context: Context) {
-            val intent = Intent(context, JarvisForegroundService::class.java)
-            context.startForegroundService(intent)
+            context.startForegroundService(Intent(context, JarvisForegroundService::class.java))
         }
 
         fun stop(context: Context) {

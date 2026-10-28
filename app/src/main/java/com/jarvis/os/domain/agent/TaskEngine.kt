@@ -33,8 +33,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
-private const val MAX_STEPS = 12
+private const val MAX_STEPS = 10
 private const val GEMINI_TIMEOUT_MS = 18_000L
 private const val OFFLINE_TIMEOUT_MS = 45_000L
 private const val OVERALL_TASK_TIMEOUT_MS = 40_000L
@@ -50,7 +52,8 @@ data class AgentStatus(
     val maxSteps: Int = MAX_STEPS,
     val lastThought: String? = null,
     val lastResult: String? = null,
-    val speech: String? = null
+    val speech: String? = null,
+    val taskId: Long = 0L
 )
 
 class TaskEngine(
@@ -58,40 +61,71 @@ class TaskEngine(
     private val gemini: GeminiClient,
     private val speech: SpeechSynthesizer,
     private val conversationStore: ConversationStore,
-    private val modeRouter: ModeRouter? = null
+    private val modeRouter: ModeRouter? = null,
+    private val inputGuard: InputGuard = InputGuard()
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var job: Job? = null
+    private val taskSeq = AtomicLong(0)
+    private val busy = AtomicBoolean(false)
 
     private val _status = MutableStateFlow(AgentStatus())
     val status: StateFlow<AgentStatus> = _status.asStateFlow()
 
     private val userReplies = mutableListOf<String>()
 
-    fun start(objective: String) {
+    fun inputGuard(): InputGuard = inputGuard
+
+    fun isBusy(): Boolean = busy.get() || when (_status.value.state) {
+        AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING, AgentState.WAITING_USER -> true
+        else -> false
+    }
+
+    /**
+     * Starts at most one task. Returns taskId or null if rejected (busy / invalid).
+     */
+    fun start(objective: String): Long? {
+        val text = objective.trim()
+        if (text.isEmpty()) return null
+
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "TASK_REJECTED concurrent objective=$text")
+            return null
+        }
+
         job?.cancel()
         userReplies.clear()
+        val id = taskSeq.incrementAndGet()
+        Log.i(TAG, "TASK_QUEUED id=$id objective=$text")
+
         job = scope.launch {
-            val finished = withTimeoutOrNull(OVERALL_TASK_TIMEOUT_MS) {
-                runLoop(objective.trim())
-            }
-            if (finished == null) {
-                Log.e(TAG, "TASK_FAILED overall timeout")
-                speakAndFinish("Time out ho gaya. Dobara try karo.", failed = true)
+            try {
+                val finished = withTimeoutOrNull(OVERALL_TASK_TIMEOUT_MS) {
+                    runLoop(id, text)
+                }
+                if (finished == null) {
+                    Log.e(TAG, "TASK_FAILED id=$id overall timeout")
+                    speakAndFinish(id, "Time out ho gaya. Dobara try karo.", failed = true)
+                }
+            } finally {
+                busy.set(false)
+                Log.i(TAG, "TASK_UNLOCK id=$id")
             }
         }
+        return id
     }
 
     fun provideUserReply(text: String) {
         if (_status.value.state == AgentState.WAITING_USER) {
             userReplies += text.trim()
-            Log.i(TAG, "USER_REPLY: $text")
+            Log.i(TAG, "USER_REPLY taskId=${_status.value.taskId} text=$text")
         }
     }
 
     fun stop() {
         job?.cancel()
         job = null
+        busy.set(false)
         _status.value = AgentStatus(state = AgentState.IDLE)
     }
 
@@ -100,23 +134,30 @@ class TaskEngine(
         scope.cancel()
     }
 
-    private suspend fun runLoop(objective: String) {
-        Log.i(TAG, "TASK_STARTED objective=$objective")
+    private suspend fun runLoop(taskId: Long, objective: String) {
+        Log.i(TAG, "TASK_STARTED id=$taskId objective=$objective")
 
         val mode = keyStore.aiMode.first()
         val settings = keyStore.current()
+        val actionLike = looksLikeDeviceAction(objective)
 
-        // Immediate acknowledgement — never silent
-        _status.value = AgentStatus(
-            state = AgentState.SPEAKING,
-            objective = objective,
-            speech = "Okay, kar rahi hoon.",
-            lastThought = "ack"
-        )
-        try {
-            speech.speak("Okay, kar rahi hoon.")
-        } catch (e: Exception) {
-            Log.w(TAG, "ack speak failed: ${e.message}")
+        // Short ack only for real device actions — avoids chat spam
+        if (actionLike) {
+            _status.value = AgentStatus(
+                state = AgentState.SPEAKING,
+                objective = objective,
+                speech = "Theek hai.",
+                lastThought = "ack",
+                taskId = taskId
+            )
+            safeSpeak("Theek hai.")
+        } else {
+            _status.value = AgentStatus(
+                state = AgentState.THINKING,
+                objective = objective,
+                lastThought = "chat",
+                taskId = taskId
+            )
         }
 
         val service = JarvisAccessibilityService.instance.value
@@ -127,59 +168,64 @@ class TaskEngine(
             )
         }
 
-        // ── Local deterministic commands (no API) ──────────────────────────
-        if (service != null) {
+        // Local deterministic commands
+        if (service != null && actionLike) {
             val local = tryLocalCommand(service, objective)
             if (local != null) {
-                Log.i(TAG, "LOCAL_COMMAND handled")
-                speakAndFinish(local.text, failed = !local.ok)
+                Log.i(TAG, "LOCAL_COMMAND id=$taskId")
+                speakAndFinish(taskId, local.text, failed = !local.ok)
                 return
             }
         }
 
-        // Offline / no key → conversation path
+        // Pure conversation (chat / message talk) → one AI reply, no agent automation loop
+        if (!actionLike) {
+            Log.i(TAG, "MODE_CHAT id=$taskId")
+            runConversationOnce(taskId, objective, mode, settings.geminiKey)
+            return
+        }
+
         val preferOffline = mode == AIMode.OFFLINE_ONLY ||
             (mode == AIMode.AUTO && settings.geminiKey.isNullOrBlank())
 
         if (preferOffline && modeRouter != null) {
-            runOfflineConversation(objective)
+            runConversationOnce(taskId, objective, mode, settings.geminiKey)
             return
         }
 
         val apiKey = settings.geminiKey
         if (apiKey.isNullOrBlank()) {
             if (modeRouter != null) {
-                runOfflineConversation(objective)
+                runConversationOnce(taskId, objective, mode, null)
                 return
             }
             speakAndFinish(
-                "Gemini API key missing. Settings mein daalo, ya Offline model download karo.",
+                taskId,
+                "Gemini API key missing. Settings mein daalo.",
                 failed = true
             )
             return
         }
 
         if (service == null) {
-            if (modeRouter != null) {
-                runOfflineConversation(objective)
-                return
-            }
-            speakAndFinish("Accessibility service on nahi hai. Settings se enable karo.", failed = true)
+            runConversationOnce(taskId, objective, mode, apiKey)
             return
         }
 
         val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
-        Log.i(TAG, "TASK_PLANNING model=$model mode=$mode")
+        Log.i(TAG, "TASK_PLANNING id=$taskId model=$model")
 
         val history = mutableListOf<String>()
         var step = 0
+        var typeTextCount = 0
 
         _status.value = AgentStatus(
             state = AgentState.THINKING,
             objective = objective,
             step = 0,
             maxSteps = MAX_STEPS,
-            lastThought = "Using $model"
+            lastThought = "Using $model",
+            taskId = taskId
         )
 
         conversationStore.append(ChatMessage(ChatRole.USER, objective))
@@ -190,9 +236,10 @@ class TaskEngine(
                 _status.value = _status.value.copy(
                     state = AgentState.THINKING,
                     step = step,
-                    lastThought = "Planning $step…"
+                    lastThought = "Planning $step…",
+                    taskId = taskId
                 )
-                Log.i(TAG, "TASK_PLANNING step=$step/$MAX_STEPS")
+                Log.i(TAG, "TASK_PLANNING id=$taskId step=$step/$MAX_STEPS")
 
                 val snapshot = service.inspectScreen()
                 val screenText = snapshot?.toPrompt() ?: "[NO SCREEN]"
@@ -217,21 +264,32 @@ class TaskEngine(
                 }
 
                 if (parsed.isFailure) {
-                    Log.w(TAG, "PARSE_FAIL step=$step")
+                    Log.w(TAG, "PARSE_FAIL id=$taskId step=$step")
                     history += "step $step: INVALID_REPLY"
                     continue
                 }
 
                 val stepResult = parsed.getOrThrow()
-                Log.i(TAG, "ACTION_SELECTED ${stepResult.action.describe()}")
+                Log.i(TAG, "ACTION_SELECTED id=$taskId ${stepResult.action.describe()}")
+
+                // Hard stop messaging loops
+                if (stepResult.action is AgentAction.TypeText) {
+                    typeTextCount++
+                    if (typeTextCount > 2) {
+                        Log.w(TAG, "TYPE_TEXT_LOOP_BREAK id=$taskId")
+                        speakAndFinish(taskId, "Message type limit. Dobara bolo agar bhejna hai.", failed = true)
+                        return
+                    }
+                }
 
                 _status.value = _status.value.copy(
                     lastThought = stepResult.thought,
-                    state = AgentState.ACTING
+                    state = AgentState.ACTING,
+                    taskId = taskId
                 )
 
                 val actionResult = execute(service, stepResult.action)
-                Log.i(TAG, "ACTION_EXECUTED success=${actionResult.success} ${actionResult.message}")
+                Log.i(TAG, "ACTION_EXECUTED id=$taskId success=${actionResult.success} ${actionResult.message}")
                 history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
                 _status.value = _status.value.copy(lastResult = actionResult.message)
 
@@ -240,36 +298,39 @@ class TaskEngine(
                         is AgentAction.OpenApp,
                         is AgentAction.Click,
                         is AgentAction.Tap,
-                        is AgentAction.Global -> service.awaitUiSettled()
+                        is AgentAction.Global,
+                        is AgentAction.TypeText,
+                        is AgentAction.PressEnter -> service.awaitUiSettled()
                         else -> Unit
                     }
                 }
 
                 when (val action = stepResult.action) {
                     is AgentAction.Finish -> {
-                        Log.i(TAG, "TASK_COMPLETED")
-                        speakAndFinish(action.speech.ifBlank { "Ho gaya." })
+                        Log.i(TAG, "TASK_COMPLETED id=$taskId")
+                        speakAndFinish(taskId, action.speech.ifBlank { "Ho gaya." })
                         return
                     }
                     is AgentAction.Fail -> {
-                        Log.i(TAG, "TASK_FAILED speech=${action.speech}")
-                        speakAndFinish(action.speech.ifBlank { "Ye kaam nahi ho paya." }, failed = true)
+                        Log.i(TAG, "TASK_FAILED id=$taskId speech=${action.speech}")
+                        speakAndFinish(taskId, action.speech.ifBlank { "Ye kaam nahi ho paya." }, failed = true)
                         return
                     }
                     is AgentAction.AskUser -> {
                         _status.value = _status.value.copy(
                             state = AgentState.WAITING_USER,
-                            speech = action.speech
+                            speech = action.speech,
+                            taskId = taskId
                         )
-                        speech.speak(action.speech)
+                        safeSpeak(action.speech)
                         val before = userReplies.size
                         var waited = 0
-                        while (userReplies.size == before && waited < 30_000 && scope.isActive) {
+                        while (userReplies.size == before && waited < 25_000 && scope.isActive) {
                             delay(300)
                             waited += 300
                         }
                         if (userReplies.size == before) {
-                            speakAndFinish("Reply nahi mila.", failed = true)
+                            speakAndFinish(taskId, "Reply nahi mila.", failed = true)
                             return
                         }
                     }
@@ -281,57 +342,138 @@ class TaskEngine(
                 }
             }
 
-            Log.i(TAG, "TASK_FAILED steps limit")
-            speakAndFinish("Steps limit. Simple command try karo jaise Chrome kholo.", failed = true)
+            Log.i(TAG, "TASK_FAILED id=$taskId steps limit")
+            speakAndFinish(taskId, "Steps limit. Short command try karo.", failed = true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "TASK_FAILED exception", e)
-            speakAndFinish("Error: ${e.message ?: "unknown"}", failed = true)
+            Log.e(TAG, "TASK_FAILED id=$taskId exception", e)
+            speakAndFinish(taskId, "Error: ${e.message ?: "unknown"}", failed = true)
         }
+    }
+
+    /** One-shot chat reply — never enters multi-step automation. */
+    private suspend fun runConversationOnce(
+        taskId: Long,
+        objective: String,
+        mode: AIMode,
+        geminiKey: String?
+    ) {
+        _status.value = _status.value.copy(state = AgentState.THINKING, lastThought = "chat", taskId = taskId)
+        conversationStore.append(ChatMessage(ChatRole.USER, objective))
+
+        val system = """You are SARA, a helpful voice assistant on Android.
+Reply in short spoken Hindi or Hinglish (1-3 sentences).
+Do not use markdown. Do not claim you performed device actions.
+Do not send or invent chat messages to third parties.""".trim()
+
+        // Prefer Gemini for chat if key present and not forced offline
+        if (!geminiKey.isNullOrBlank() && mode != AIMode.OFFLINE_ONLY) {
+            val model = SecureKeyStore.migrateModel(
+                keyStore.current().geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL }
+            )
+            val timed = withTimeoutOrNull(GEMINI_TIMEOUT_MS) {
+                gemini.generateJson(geminiKey, model, system, objective)
+            }
+            when (timed) {
+                null -> {
+                    speakAndFinish(taskId, "Reply slow aa raha hai.", failed = true)
+                    return
+                }
+                is ApiResult.Success -> {
+                    val text = timed.value.trim().removeSurrounding("\"")
+                    // If model returned JSON by habit, strip to speech field roughly
+                    val spoken = extractSpoken(text)
+                    speakAndFinish(taskId, spoken.ifBlank { "Samajh gayi." })
+                    return
+                }
+                is ApiResult.Failure -> {
+                    Log.w(TAG, "chat gemini fail: ${timed.error.message}")
+                    // fall through to offline
+                }
+            }
+        }
+
+        val router = modeRouter
+        if (router == null) {
+            speakAndFinish(taskId, "Abhi chat ke liye AI available nahi hai.", failed = true)
+            return
+        }
+
+        val result = withTimeoutOrNull(OFFLINE_TIMEOUT_MS) {
+            router.generate(system, objective, maxTokens = 160)
+        }
+        when (result) {
+            null -> speakAndFinish(taskId, "Offline model slow hai.", failed = true)
+            is AIEngineResult.Success -> speakAndFinish(taskId, result.text)
+            is AIEngineResult.Failure -> {
+                val msg = when (result.kind) {
+                    AIEngineResult.FailureKind.MODEL_NOT_INSTALLED ->
+                        "Offline model download nahi hai. Settings se karo."
+                    else -> result.message
+                }
+                speakAndFinish(taskId, msg, failed = true)
+            }
+        }
+    }
+
+    private fun extractSpoken(raw: String): String {
+        // Prefer "speech":"..." if present
+        val m = Regex("\"speech\"\\s*:\\s*\"([^\"]+)\"").find(raw)
+        if (m != null) return m.groupValues[1]
+        if (raw.startsWith("{")) {
+            // Avoid reading full JSON aloud
+            return "Theek hai."
+        }
+        return raw.take(280)
+    }
+
+    private fun looksLikeDeviceAction(objective: String): Boolean {
+        val t = objective.lowercase()
+        val actionHints = listOf(
+            "kholo", "khol", "open", "launch", "start", "band", "close",
+            "click", "tap", "scroll", "swipe", "type", "likho", "bhejo", "send",
+            "call", "dial", "phone", "home", "back", "settings", "wifi",
+            "wifi", "brightness", "volume", "screenshot",
+            "खोलो", "भेजो", "कॉल"
+        )
+        if (actionHints.any { t.contains(it) }) return true
+        if (extractOpenAppTarget(objective) != null) return true
+        // Pure chat / Q&A
+        return false
     }
 
     private data class LocalResult(val ok: Boolean, val text: String)
 
-    /** Deterministic phone commands without Gemini. */
     private suspend fun tryLocalCommand(service: JarvisAccessibilityService, objective: String): LocalResult? {
         val t = objective.trim().lowercase()
 
-        // Home
         if (t.matches(Regex(".*\\b(home|homescreen|ghar|होम)\\b.*")) &&
             (t.contains("jao") || t.contains("jaao") || t.contains("go") || t.contains("khol") || t.length < 12)
         ) {
-            Log.i(TAG, "LOCAL home")
             val r = service.globalAction(GlobalCommand.HOME)
             return LocalResult(r.success, if (r.success) "Home screen par aa gaye." else r.message)
         }
 
-        // Back
         if (t.matches(Regex(".*\\b(back|peeche|पीछे|वापस)\\b.*")) && t.length < 24) {
-            Log.i(TAG, "LOCAL back")
             val r = service.globalAction(GlobalCommand.BACK)
             return LocalResult(r.success, if (r.success) "Back kar diya." else r.message)
         }
 
-        // Open app
         val appTarget = extractOpenAppTarget(objective)
         if (appTarget != null) {
             Log.i(TAG, "LOCAL_FAST_PATH open_app=$appTarget")
             _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $appTarget")
             val result = service.launchApp(appTarget)
-            Log.i(TAG, "ACTION_VERIFIED success=${result.success} msg=${result.message}")
             return LocalResult(
                 result.success,
                 if (result.success) "$appTarget khol diya." else result.message.ifBlank { "$appTarget nahi khul paya." }
             )
         }
 
-        // Settings → WiFi style
         if ((t.contains("wifi") || t.contains("wi-fi") || t.contains("वाईफाई")) &&
             (t.contains("setting") || t.contains("khol") || t.contains("open"))
         ) {
-            Log.i(TAG, "LOCAL wifi settings")
-            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "WiFi settings")
             val open = service.launchApp("Settings")
             if (!open.success) return LocalResult(false, open.message)
             service.awaitUiSettled(500, 3000)
@@ -343,56 +485,15 @@ class TaskEngine(
             if (wifiNode != null) {
                 val click = service.clickNode(wifiNode.id)
                 service.awaitUiSettled()
-                Log.i(TAG, "ACTION_VERIFIED wifi click success=${click.success}")
                 return LocalResult(
                     click.success,
                     if (click.success) "WiFi settings khol diye." else "Settings khule, WiFi option nahi mila."
                 )
             }
-            return LocalResult(true, "Settings khol diye. WiFi option screen par dikh nahi raha.")
+            return LocalResult(true, "Settings khol diye.")
         }
 
         return null
-    }
-
-    private suspend fun runOfflineConversation(objective: String) {
-        val router = modeRouter
-        if (router == null) {
-            speakAndFinish("Offline AI available nahi hai.", failed = true)
-            return
-        }
-
-        _status.value = _status.value.copy(state = AgentState.THINKING, lastThought = "Offline AI…")
-        conversationStore.append(ChatMessage(ChatRole.USER, objective))
-
-        val system = """You are SARA, a helpful voice assistant on Android.
-Reply in short spoken Hindi or Hinglish (1-3 sentences).
-Do not use markdown. Do not claim you performed device actions unless confirmed.""".trim()
-
-        val result = withTimeoutOrNull(OFFLINE_TIMEOUT_MS) {
-            router.generate(system, objective, maxTokens = 160)
-        }
-
-        when (result) {
-            null -> {
-                Log.e(TAG, "TASK_FAILED offline timeout")
-                speakAndFinish("Offline model slow hai ya load nahi hua.", failed = true)
-            }
-            is AIEngineResult.Success -> {
-                Log.i(TAG, "TASK_COMPLETED offline")
-                speakAndFinish(result.text)
-            }
-            is AIEngineResult.Failure -> {
-                Log.e(TAG, "TASK_FAILED offline ${result.kind} ${result.message}")
-                val msg = when (result.kind) {
-                    AIEngineResult.FailureKind.MODEL_NOT_INSTALLED ->
-                        "Offline AI model isn't downloaded yet. Settings se download karo."
-                    AIEngineResult.FailureKind.INSUFFICIENT_MEMORY -> result.message
-                    else -> result.message
-                }
-                speakAndFinish(msg, failed = true)
-            }
-        }
     }
 
     private fun extractOpenAppTarget(objective: String): String? {
@@ -417,7 +518,6 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
                 return name
             }
         }
-        // Bare app names: "chrome", "youtube"
         val known = listOf(
             "chrome", "youtube", "whatsapp", "gmail", "maps", "instagram",
             "facebook", "twitter", "telegram", "snapchat", "spotify", "netflix",
@@ -434,7 +534,7 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
         }
         if (timed == null) {
             Log.w(TAG, "Gemini TIMEOUT model=$model")
-            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini slow hai. Model change karke try karo.\"}"
+            return "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Gemini slow hai.\"}"
         }
         return when (timed) {
             is ApiResult.Success -> timed.value
@@ -467,24 +567,30 @@ Do not use markdown. Do not claim you performed device actions unless confirmed.
         }
     }
 
-    private suspend fun speakAndFinish(text: String, failed: Boolean = false) {
-        _status.value = _status.value.copy(state = AgentState.SPEAKING, speech = text)
+    private suspend fun safeSpeak(text: String) {
+        if (text.isBlank()) return
+        inputGuard.registerSpoken(text)
+        try {
+            speech.speak(text)
+        } catch (e: Exception) {
+            Log.w(TAG, "speak failed: ${e.message}")
+        }
+    }
+
+    private suspend fun speakAndFinish(taskId: Long, text: String, failed: Boolean = false) {
+        _status.value = _status.value.copy(state = AgentState.SPEAKING, speech = text, taskId = taskId)
         if (text.isNotBlank()) {
-            try {
-                speech.speak(text)
-            } catch (e: Exception) {
-                Log.w(TAG, "final speak failed: ${e.message}")
-            }
+            safeSpeak(text)
             conversationStore.append(ChatMessage(ChatRole.ASSISTANT, text))
         }
         _status.value = _status.value.copy(
             state = if (failed) AgentState.FAILED else AgentState.FINISHED,
-            speech = text
+            speech = text,
+            taskId = taskId
         )
-        // Brief hold so service can pause STT during TTS, then return to IDLE/listening
-        delay(400)
-        _status.value = _status.value.copy(state = AgentState.IDLE)
-        Log.i(TAG, if (failed) "TASK_FAILED done" else "TASK_COMPLETED done")
+        delay(300)
+        _status.value = _status.value.copy(state = AgentState.IDLE, taskId = taskId)
+        Log.i(TAG, if (failed) "TASK_FAILED id=$taskId done" else "TASK_COMPLETED id=$taskId done")
     }
 
     companion object {

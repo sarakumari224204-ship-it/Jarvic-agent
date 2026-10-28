@@ -1,7 +1,6 @@
 package com.jarvis.os.domain.agent
 
 import com.jarvis.os.domain.model.ChatMessage
-import com.jarvis.os.domain.model.ChatRole
 
 object AgentPrompts {
 
@@ -27,8 +26,14 @@ ask_user {"speech":"..."}
 finish {"speech":"..."}
 fail {"speech":"..."}
 
-Screen lines: [id] Class text="..." desc="..." {flags} @(x,y)
-Prefer node_id. Use open_app if app not open. finish only when done. speech in user's language, 1 short sentence.
+Rules:
+- Prefer node_id over coordinates.
+- Use open_app if the target app is not already open.
+- Never type the same message more than once. After a successful type_text for messaging, press_enter once then finish.
+- Do not keep sending messages in a loop.
+- Do not ask_user unless you truly need missing info.
+- finish only when the user objective is done; speech = one short sentence in the user's language.
+- If the user only wants a spoken answer (no phone UI action), reply with finish and the answer — do not open apps.
 """.trimIndent()
 
     fun userTurn(
@@ -50,11 +55,10 @@ Prefer node_id. Use open_app if app not open. finish only when done. speech in u
             appendLine("USER REPLIES:")
             userReplies.takeLast(3).forEach { appendLine("- $it") }
         }
-        // Keep screen compact for speed
         val compactScreen = screen.lineSequence().take(80).joinToString("\n")
         appendLine("SCREEN:")
         appendLine(compactScreen)
-        append("One JSON action:")
+        append("One JSON action (no loops):")
     }
 
     fun repairTurn(error: String): String =
