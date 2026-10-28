@@ -2,17 +2,13 @@ package com.jarvis.os.domain.agent
 
 import android.util.Log
 import com.jarvis.os.accessibility.ActionResult
-import com.jarvis.os.accessibility.GlobalCommand
 import com.jarvis.os.accessibility.JarvisAccessibilityService
-import com.jarvis.os.accessibility.ScreenSnapshot
-import com.jarvis.os.accessibility.ScrollDirection
 import com.jarvis.os.data.remote.ApiResult
 import com.jarvis.os.data.remote.GeminiClient
 import com.jarvis.os.data.secure.ConversationStore
 import com.jarvis.os.data.secure.SecureKeyStore
 import com.jarvis.os.domain.model.AgentAction
 import com.jarvis.os.domain.model.AgentDecisionParser
-import com.jarvis.os.domain.model.AgentStep
 import com.jarvis.os.domain.model.ChatMessage
 import com.jarvis.os.domain.model.ChatRole
 import com.jarvis.os.domain.model.describe
@@ -27,10 +23,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val MAX_STEPS = 25
 
 enum class AgentState {
     IDLE, THINKING, ACTING, SPEAKING, WAITING_USER, FINISHED, FAILED
@@ -71,7 +68,6 @@ class TaskEngine(
     fun provideUserReply(text: String) {
         if (_status.value.state == AgentState.WAITING_USER) {
             userReplies += text.trim()
-            // Resume is handled by the waiting loop checking the list size
         }
     }
 
@@ -100,7 +96,6 @@ class TaskEngine(
             return
         }
 
-        // Block our own package + system UI from being operated
         JarvisAccessibilityService.blockedPackages = setOf(
             service.packageName,
             "com.android.systemui"
@@ -140,17 +135,18 @@ class TaskEngine(
                 var raw = callGemini(apiKey, settings.geminiModel, userPrompt)
                 var parsed = AgentDecisionParser.parse(raw)
 
-                // One repair attempt
                 if (parsed.isFailure) {
                     val repair = AgentPrompts.repairTurn(parsed.exceptionOrNull()?.message ?: "parse error")
                     raw = callGemini(apiKey, settings.geminiModel, "$userPrompt\n\n$repair")
                     parsed = AgentDecisionParser.parse(raw)
                 }
 
-                val stepResult = parsed.getOrElse {
-                    history += "step $step: INVALID_REPLY (${it.message})"
+                if (parsed.isFailure) {
+                    history += "step $step: INVALID_REPLY (${parsed.exceptionOrNull()?.message})"
                     continue
                 }
+
+                val stepResult = parsed.getOrThrow()
 
                 _status.value = _status.value.copy(
                     lastThought = stepResult.thought,
@@ -178,7 +174,6 @@ class TaskEngine(
                         )
                         speech.speak(action.speech)
                         val before = userReplies.size
-                        // Wait for user reply (max 60s)
                         var waited = 0
                         while (userReplies.size == before && waited < 60_000 && scope.isActive) {
                             delay(300)
@@ -194,7 +189,6 @@ class TaskEngine(
                         service.awaitUiSettled()
                     }
                     else -> {
-                        // Give UI time to settle after gesture / app launch
                         service.awaitUiSettled()
                     }
                 }
@@ -257,6 +251,5 @@ class TaskEngine(
 
     companion object {
         private const val TAG = "TaskEngine"
-        const val MAX_STEPS = 25
     }
 }
