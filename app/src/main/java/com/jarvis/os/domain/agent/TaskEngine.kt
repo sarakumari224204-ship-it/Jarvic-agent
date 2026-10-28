@@ -81,9 +81,6 @@ class TaskEngine(
         else -> false
     }
 
-    /**
-     * Starts at most one task. Returns taskId or null if rejected (busy / invalid).
-     */
     fun start(objective: String): Long? {
         val text = objective.trim()
         if (text.isEmpty()) return null
@@ -141,7 +138,6 @@ class TaskEngine(
         val settings = keyStore.current()
         val actionLike = looksLikeDeviceAction(objective)
 
-        // Short ack only for real device actions — avoids chat spam
         if (actionLike) {
             _status.value = AgentStatus(
                 state = AgentState.SPEAKING,
@@ -168,7 +164,6 @@ class TaskEngine(
             )
         }
 
-        // Local deterministic commands
         if (service != null && actionLike) {
             val local = tryLocalCommand(service, objective)
             if (local != null) {
@@ -178,7 +173,6 @@ class TaskEngine(
             }
         }
 
-        // Pure conversation (chat / message talk) → one AI reply, no agent automation loop
         if (!actionLike) {
             Log.i(TAG, "MODE_CHAT id=$taskId")
             runConversationOnce(taskId, objective, mode, settings.geminiKey)
@@ -199,11 +193,7 @@ class TaskEngine(
                 runConversationOnce(taskId, objective, mode, null)
                 return
             }
-            speakAndFinish(
-                taskId,
-                "Gemini API key missing. Settings mein daalo.",
-                failed = true
-            )
+            speakAndFinish(taskId, "Gemini API key missing. Settings mein daalo.", failed = true)
             return
         }
 
@@ -272,7 +262,6 @@ class TaskEngine(
                 val stepResult = parsed.getOrThrow()
                 Log.i(TAG, "ACTION_SELECTED id=$taskId ${stepResult.action.describe()}")
 
-                // Hard stop messaging loops
                 if (stepResult.action is AgentAction.TypeText) {
                     typeTextCount++
                     if (typeTextCount > 2) {
@@ -352,7 +341,6 @@ class TaskEngine(
         }
     }
 
-    /** One-shot chat reply — never enters multi-step automation. */
     private suspend fun runConversationOnce(
         taskId: Long,
         objective: String,
@@ -367,13 +355,12 @@ Reply in short spoken Hindi or Hinglish (1-3 sentences).
 Do not use markdown. Do not claim you performed device actions.
 Do not send or invent chat messages to third parties.""".trim()
 
-        // Prefer Gemini for chat if key present and not forced offline
         if (!geminiKey.isNullOrBlank() && mode != AIMode.OFFLINE_ONLY) {
             val model = SecureKeyStore.migrateModel(
                 keyStore.current().geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL }
             )
             val timed = withTimeoutOrNull(GEMINI_TIMEOUT_MS) {
-                gemini.generateJson(geminiKey, model, system, objective)
+                gemini.generateText(geminiKey, model, system, objective)
             }
             when (timed) {
                 null -> {
@@ -382,14 +369,12 @@ Do not send or invent chat messages to third parties.""".trim()
                 }
                 is ApiResult.Success -> {
                     val text = timed.value.trim().removeSurrounding("\"")
-                    // If model returned JSON by habit, strip to speech field roughly
                     val spoken = extractSpoken(text)
                     speakAndFinish(taskId, spoken.ifBlank { "Samajh gayi." })
                     return
                 }
                 is ApiResult.Failure -> {
                     Log.w(TAG, "chat gemini fail: ${timed.error.message}")
-                    // fall through to offline
                 }
             }
         }
@@ -418,13 +403,9 @@ Do not send or invent chat messages to third parties.""".trim()
     }
 
     private fun extractSpoken(raw: String): String {
-        // Prefer "speech":"..." if present
         val m = Regex("\"speech\"\\s*:\\s*\"([^\"]+)\"").find(raw)
         if (m != null) return m.groupValues[1]
-        if (raw.startsWith("{")) {
-            // Avoid reading full JSON aloud
-            return "Theek hai."
-        }
+        if (raw.startsWith("{")) return "Theek hai."
         return raw.take(280)
     }
 
@@ -434,12 +415,11 @@ Do not send or invent chat messages to third parties.""".trim()
             "kholo", "khol", "open", "launch", "start", "band", "close",
             "click", "tap", "scroll", "swipe", "type", "likho", "bhejo", "send",
             "call", "dial", "phone", "home", "back", "settings", "wifi",
-            "wifi", "brightness", "volume", "screenshot",
+            "brightness", "volume", "screenshot",
             "खोलो", "भेजो", "कॉल"
         )
         if (actionHints.any { t.contains(it) }) return true
         if (extractOpenAppTarget(objective) != null) return true
-        // Pure chat / Q&A
         return false
     }
 
