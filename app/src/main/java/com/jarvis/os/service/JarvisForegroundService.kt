@@ -19,6 +19,8 @@ import com.jarvis.os.domain.agent.TaskEngine
 import com.jarvis.os.presentation.MainActivity
 import com.jarvis.os.runtime.JarvisRuntime
 import com.jarvis.os.speech.ContinuousSpeechRecognizer
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -26,6 +28,7 @@ class JarvisForegroundService : LifecycleService() {
 
     private lateinit var speechRecognizer: ContinuousSpeechRecognizer
     private lateinit var taskEngine: TaskEngine
+    private var resumeJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -68,17 +71,29 @@ class JarvisForegroundService : LifecycleService() {
                 JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
 
-                // Pause STT while working so TTS is not picked up as a new command
                 when (status.state) {
                     AgentState.THINKING,
                     AgentState.ACTING,
                     AgentState.SPEAKING,
-                    AgentState.WAITING_USER -> speechRecognizer.pause()
-                    AgentState.IDLE,
+                    AgentState.WAITING_USER -> {
+                        resumeJob?.cancel()
+                        speechRecognizer.pause()
+                    }
                     AgentState.FINISHED,
-                    AgentState.FAILED -> {
-                        // Small delay so last TTS tail is not captured
-                        speechRecognizer.resume()
+                    AgentState.FAILED,
+                    AgentState.IDLE -> {
+                        // Wait for TTS to finish before opening the mic again
+                        resumeJob?.cancel()
+                        resumeJob = lifecycleScope.launch {
+                            delay(1800)
+                            if (taskEngine.status.value.state == AgentState.IDLE ||
+                                taskEngine.status.value.state == AgentState.FINISHED ||
+                                taskEngine.status.value.state == AgentState.FAILED
+                            ) {
+                                Log.i(TAG, "STT_RESUME after task")
+                                speechRecognizer.resume()
+                            }
+                        }
                     }
                 }
             }
@@ -100,7 +115,7 @@ class JarvisForegroundService : LifecycleService() {
                 taskEngine.provideUserReply(trimmed)
             }
             AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
-                // Pause immediately so ack TTS is not re-heard
+                resumeJob?.cancel()
                 speechRecognizer.pause()
                 taskEngine.start(trimmed)
             }
@@ -112,6 +127,7 @@ class JarvisForegroundService : LifecycleService() {
 
     override fun onDestroy() {
         Log.i(TAG, "SERVICE_DESTROY")
+        resumeJob?.cancel()
         speechRecognizer.shutdown()
         taskEngine.shutdown()
         JarvisRuntime.setServiceRunning(false)
