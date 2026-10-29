@@ -195,7 +195,7 @@ private fun TeachInputSection(
                     SaraMemory(
                         id = java.util.UUID.randomUUID().toString(),
                         text = text,
-                        category = MemoryCategory.GENERAL,
+                        category = MemoryCategory.OTHER,
                         pinned = false,
                         enabled = true,
                         updatedAt = System.currentTimeMillis()
@@ -292,7 +292,7 @@ private fun MemorySection(
                 SaraMemory(
                     id = java.util.UUID.randomUUID().toString(),
                     text = text,
-                    category = MemoryCategory.GENERAL,
+                    category = MemoryCategory.OTHER,
                     pinned = false,
                     enabled = true,
                     updatedAt = System.currentTimeMillis()
