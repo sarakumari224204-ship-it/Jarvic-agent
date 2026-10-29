@@ -65,6 +65,19 @@ class AppResolverTest {
     }
 
     @Test
+    fun packageNameExactMatch() {
+        val hit = AppResolver.resolve("com.whatsapp", sampleApps)
+        assertNotNull(hit)
+        assertEquals("com.whatsapp", hit!!.packageName)
+    }
+
+    @Test
+    fun searchTokensIncludeAliases() {
+        val tokens = AppResolver.searchTokens("यूट्यूब")
+        assertTrue(tokens.any { it.contains("youtube") })
+    }
+
+    @Test
     fun extractOpenTargetEnglish() {
         assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube kholo"))
         assertEquals("Chrome", AppResolver.extractOpenTarget("Chrome open karo"))
@@ -84,15 +97,92 @@ class AppResolverTest {
     }
 
     @Test
-    fun packageNameExactMatch() {
-        val hit = AppResolver.resolve("com.whatsapp", sampleApps)
-        assertNotNull(hit)
-        assertEquals("com.whatsapp", hit!!.packageName)
+    fun extractYouTubeWithFillers() {
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube please kholo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("please YouTube kholo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube ko kholo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("zara YouTube kholo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("jara YouTube kholo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube open karo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube ko open karo"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube chalao"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube chala do"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("open YouTube"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("open YouTube please"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("please open YouTube"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("start YouTube"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("launch YouTube"))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("  YouTube   kholo  "))
+        assertEquals("YouTube", AppResolver.extractOpenTarget("YouTube, kholo!"))
     }
 
     @Test
-    fun searchTokensIncludeAliases() {
-        val tokens = AppResolver.searchTokens("यूट्यूब")
-        assertTrue(tokens.any { it.contains("youtube") })
+    fun extractYouTubeHindiFillers() {
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("यूट्यूब खोलो"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("यूट्यूब को खोलो"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("जरा यूट्यूब खोलो"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("यूट्यूब खोल दो"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("प्लीज यूट्यूब खोलो"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("यूट्यूब चलाओ"))
+        assertEquals("यूट्यूब", AppResolver.extractOpenTarget("यूट्यूब चला दो"))
+    }
+
+    @Test
+    fun extractWhatsAppFillers() {
+        assertEquals("WhatsApp", AppResolver.extractOpenTarget("WhatsApp kholo"))
+        assertEquals("WhatsApp", AppResolver.extractOpenTarget("WhatsApp ko kholo"))
+        assertEquals("WhatsApp", AppResolver.extractOpenTarget("please WhatsApp kholo"))
+        assertEquals("WhatsApp", AppResolver.extractOpenTarget("WhatsApp open karo"))
+        assertEquals("WhatsApp", AppResolver.extractOpenTarget("WhatsApp chalao"))
+        assertEquals("व्हाट्सऐप", AppResolver.extractOpenTarget("व्हाट्सऐप खोलो"))
+        assertEquals("व्हाट्सएप", AppResolver.extractOpenTarget("व्हाट्सएप को खोलो"))
+    }
+
+    @Test
+    fun extractChromeFillers() {
+        assertEquals("Chrome", AppResolver.extractOpenTarget("Chrome kholo"))
+        assertEquals("Chrome", AppResolver.extractOpenTarget("Chrome ko kholo"))
+        assertEquals("Chrome", AppResolver.extractOpenTarget("please Chrome open karo"))
+        assertEquals("क्रोम", AppResolver.extractOpenTarget("क्रोम खोलो"))
+    }
+
+    @Test
+    fun extractInstagramFillers() {
+        assertEquals("Instagram", AppResolver.extractOpenTarget("Instagram kholo"))
+        assertEquals("Insta", AppResolver.extractOpenTarget("Insta kholo"))
+        assertEquals("Instagram", AppResolver.extractOpenTarget("Instagram ko open karo"))
+        assertEquals("इंस्टाग्राम", AppResolver.extractOpenTarget("इंस्टाग्राम खोलो"))
+    }
+
+    @Test
+    fun extractRejectsNonLaunchCommands() {
+        assertNull(AppResolver.extractOpenTarget("YouTube par search karo"))
+        assertNull(AppResolver.extractOpenTarget("YouTube video search karo"))
+        assertNull(AppResolver.extractOpenTarget("YouTube ke baare mein batao"))
+        assertNull(AppResolver.extractOpenTarget("WhatsApp par message bhejo"))
+        assertNull(AppResolver.extractOpenTarget("WhatsApp par call karo"))
+        assertNull(AppResolver.extractOpenTarget("Chrome mein search karo"))
+        assertNull(AppResolver.extractOpenTarget("YouTube par search"))
+        assertNull(AppResolver.extractOpenTarget("search YouTube"))
+    }
+
+    @Test
+    fun extractThenResolveYouTubePleaseKholo() {
+        val target = AppResolver.extractOpenTarget("YouTube please kholo")
+        assertNotNull(target)
+        val hit = AppResolver.resolve(target!!, sampleApps)
+        assertEquals("com.google.android.youtube", hit!!.packageName)
+    }
+
+    @Test
+    fun extractThenResolveZaraYouTube() {
+        val target = AppResolver.extractOpenTarget("zara YouTube kholo")
+        assertEquals("com.google.android.youtube", AppResolver.resolve(target!!, sampleApps)!!.packageName)
+    }
+
+    @Test
+    fun extractThenResolveHindiKo() {
+        val target = AppResolver.extractOpenTarget("यूट्यूब को खोलो")
+        assertEquals("com.google.android.youtube", AppResolver.resolve(target!!, sampleApps)!!.packageName)
     }
 }
