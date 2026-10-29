@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
@@ -60,19 +61,61 @@ class JarvisAccessibilityService : AccessibilityService() {
         nodeRefs = emptyMap()
     }
 
-    suspend fun inspectScreen(): ScreenSnapshot? = withContext(Dispatchers.Default) {
-        val root = awaitRoot() ?: return@withContext null
-        val pkg = root.packageName?.toString()
+    /**
+     * Capture the active window hierarchy.
+     * Distinguishes: transient root unavailability (loading) vs hard blocked packages.
+     * Retries across app transitions so a temporary null root is not reported as
+     * "accessibility disabled/restricted".
+     */
+    suspend fun inspectScreen(
+        timeoutMs: Long = INSPECT_TIMEOUT_MS
+    ): ScreenSnapshot = withContext(Dispatchers.Default) {
         val (w, h) = screenSize()
+        val start = SystemClock.uptimeMillis()
+        var lastBlockedPkg: String? = null
 
-        if (pkg != null && pkg in blockedPackages) {
-            nodeRefs = emptyMap()
-            return@withContext ScreenSnapshot(pkg, w, h, emptyList(), blocked = true)
+        while (SystemClock.uptimeMillis() - start < timeoutMs) {
+            val root = activeRoot()
+            if (root == null) {
+                delay(ROOT_RETRY_DELAY_MS)
+                continue
+            }
+            val pkg = root.packageName?.toString()
+            // Self / system UI during transition — wait for the real target window
+            if (pkg != null && pkg in blockedPackages) {
+                lastBlockedPkg = pkg
+                delay(ROOT_RETRY_DELAY_MS)
+                continue
+            }
+            val collected = collect(root)
+            nodeRefs = collected.refs
+            return@withContext ScreenSnapshot(
+                packageName = pkg,
+                width = w,
+                height = h,
+                nodes = collected.nodes,
+                truncated = collected.truncated
+            )
         }
 
-        val collected = collect(root)
-        nodeRefs = collected.refs
-        ScreenSnapshot(pkg, w, h, collected.nodes, truncated = collected.truncated)
+        if (lastBlockedPkg != null && currentPackage() in blockedPackages) {
+            nodeRefs = emptyMap()
+            return@withContext ScreenSnapshot(
+                packageName = lastBlockedPkg,
+                width = w,
+                height = h,
+                nodes = emptyList(),
+                blocked = true
+            )
+        }
+        nodeRefs = emptyMap()
+        ScreenSnapshot(
+            packageName = currentPackage(),
+            width = w,
+            height = h,
+            nodes = emptyList(),
+            rootUnavailable = true
+        )
     }
 
     private class Collected(
@@ -82,50 +125,47 @@ class JarvisAccessibilityService : AccessibilityService() {
     )
 
     private fun collect(root: AccessibilityNodeInfo): Collected {
-        val nodes = ArrayList<ScreenNode>()
-        val refs = HashMap<Int, AccessibilityNodeInfo>()
+        val nodes = mutableListOf<ScreenNode>()
+        val refs = mutableMapOf<Int, AccessibilityNodeInfo>()
         var truncated = false
-        val rect = Rect()
+        var nextId = 1
 
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
             if (nodes.size >= MAX_NODES) {
                 truncated = true
                 return
             }
-            if (depth > MAX_DEPTH || !node.isVisibleToUser) return
-
-            node.getBoundsInScreen(rect)
-            val isPassword = node.isPassword
-            val text = if (isPassword) null else node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-            val desc = node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-            val hint = node.hintText?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-
-            val interesting = text != null || desc != null ||
-                node.isClickable || node.isLongClickable || node.isEditable ||
-                node.isScrollable || node.isCheckable
-
-            if (interesting && rect.width() > 0 && rect.height() > 0) {
-                val id = nodes.size
-                nodes += ScreenNode(
-                    id = id,
-                    className = node.className?.toString() ?: "View",
-                    text = text?.clip(MAX_TEXT),
-                    contentDescription = desc?.clip(MAX_TEXT),
-                    hint = hint?.clip(MAX_TEXT),
-                    viewId = node.viewIdResourceName?.substringAfter(":id/"),
-                    bounds = BoundsRect(rect.left, rect.top, rect.right, rect.bottom),
-                    clickable = node.isClickable,
-                    longClickable = node.isLongClickable,
-                    scrollable = node.isScrollable,
-                    editable = node.isEditable,
-                    focused = node.isFocused,
-                    checked = if (node.isCheckable) node.isChecked else null,
-                    enabled = node.isEnabled,
-                    passwordField = isPassword
-                )
-                refs[id] = node
+            if (depth > MAX_DEPTH) {
+                truncated = true
+                return
             }
-
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            val text = node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            val desc = node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            val hint = if (android.os.Build.VERSION.SDK_INT >= 26) {
+                node.hintText?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            } else null
+            val viewId = node.viewIdResourceName?.substringAfterLast('/')
+            val id = nextId++
+            refs[id] = node
+            nodes += ScreenNode(
+                id = id,
+                className = node.className?.toString() ?: "",
+                text = text?.clip(MAX_TEXT),
+                contentDescription = desc?.clip(MAX_TEXT),
+                hint = hint?.clip(MAX_TEXT),
+                viewId = viewId,
+                bounds = BoundsRect(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                clickable = node.isClickable,
+                longClickable = node.isLongClickable,
+                scrollable = node.isScrollable,
+                editable = node.isEditable,
+                focused = node.isFocused,
+                checked = if (node.isCheckable) node.isChecked else null,
+                enabled = node.isEnabled,
+                passwordField = node.isPassword
+            )
             for (i in 0 until node.childCount) {
                 val child = node.getChild(i) ?: continue
                 visit(child, depth + 1)
@@ -136,44 +176,32 @@ class JarvisAccessibilityService : AccessibilityService() {
         return Collected(nodes, refs, truncated)
     }
 
-    fun currentPackage(): String? = rootInActiveWindow?.packageName?.toString()
+    fun currentPackage(): String? = activeRoot()?.packageName?.toString()
+        ?: rootInActiveWindow?.packageName?.toString()
 
     suspend fun clickNode(nodeId: Int): ActionResult = withContext(Dispatchers.Default) {
         blockedResult()?.let { return@withContext it }
         val node = nodeRefs[nodeId]
             ?: return@withContext ActionResult.fail("Unknown node $nodeId. Inspect the screen again.")
         if (!node.refresh()) {
-            return@withContext ActionResult.fail("Node $nodeId is stale. Inspect the screen again.")
+            return@withContext ActionResult.fail("Node $nodeId is stale.")
         }
-
-        var target: AccessibilityNodeInfo? = node
-        var hops = 0
-        while (target != null && !target.isClickable && hops < MAX_PARENT_HOPS) {
-            target = target.parent
-            hops++
+        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            ActionResult.ok("Clicked node $nodeId")
+        } else {
+            ActionResult.fail("Click failed on node $nodeId")
         }
-        if (target != null && target.isClickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            return@withContext ActionResult.ok("Clicked node $nodeId")
-        }
-
-        val rect = Rect()
-        node.getBoundsInScreen(rect)
-        tap(rect.centerX(), rect.centerY())
     }
 
     suspend fun longClickNode(nodeId: Int): ActionResult = withContext(Dispatchers.Default) {
         blockedResult()?.let { return@withContext it }
         val node = nodeRefs[nodeId]
-            ?: return@withContext ActionResult.fail("Unknown node $nodeId. Inspect the screen again.")
-        if (!node.refresh()) {
-            return@withContext ActionResult.fail("Node $nodeId is stale. Inspect the screen again.")
-        }
-        if (node.isLongClickable && node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+            ?: return@withContext ActionResult.fail("Unknown node $nodeId.")
+        if (!node.refresh()) return@withContext ActionResult.fail("Node $nodeId is stale.")
+        if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
             ActionResult.ok("Long-clicked node $nodeId")
         } else {
-            val rect = Rect()
-            node.getBoundsInScreen(rect)
-            longPress(rect.centerX(), rect.centerY())
+            ActionResult.fail("Long-click failed on node $nodeId")
         }
     }
 
@@ -181,48 +209,49 @@ class JarvisAccessibilityService : AccessibilityService() {
         withContext(Dispatchers.Default) {
             blockedResult()?.let { return@withContext it }
             val node = resolveEditable(nodeId)
-                ?: return@withContext ActionResult.fail("No editable text field found.")
-            if (node.isPassword) {
-                return@withContext ActionResult.fail(
-                    "This is a password field. Ask the user to type it themselves."
-                )
-            }
-
-            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            val existing = if (append && !node.isShowingHintText) node.text?.toString().orEmpty() else ""
+                ?: return@withContext ActionResult.fail("No editable field found.")
+            if (!node.refresh()) return@withContext ActionResult.fail("Editable node is stale.")
             val args = Bundle().apply {
                 putCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                    existing + text
+                    if (append) ((node.text?.toString() ?: "") + text) else text
                 )
             }
             if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                ActionResult.ok("Typed text into the field")
+                ActionResult.ok("Typed text")
             } else {
-                ActionResult.fail("The field rejected text input.")
+                ActionResult.fail("Could not set text")
             }
         }
 
     suspend fun pressEnter(nodeId: Int? = null): ActionResult = withContext(Dispatchers.Default) {
         blockedResult()?.let { return@withContext it }
         val node = resolveEditable(nodeId)
-            ?: return@withContext ActionResult.fail("No editable text field found.")
-        val ok = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
-        if (ok) ActionResult.ok("Pressed Enter") else ActionResult.fail("The field ignored Enter.")
+        if (node != null && node.refresh()) {
+            val args = Bundle().apply {
+                putInt(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+                    AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE
+                )
+                putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, false)
+            }
+            node.performAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY, args)
+        }
+        ActionResult.ok("Enter")
     }
 
     private fun resolveEditable(nodeId: Int?): AccessibilityNodeInfo? {
         if (nodeId != null) {
-            val node = nodeRefs[nodeId] ?: return null
-            return if (node.refresh() && node.isEditable) node else null
+            val n = nodeRefs[nodeId]
+            if (n != null && n.isEditable) return n
         }
-        val root = rootInActiveWindow ?: return null
-        return root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
-            ?: findFirstEditable(root, 0)
+        nodeRefs.values.firstOrNull { it.isEditable && it.isFocused }?.let { return it }
+        nodeRefs.values.firstOrNull { it.isEditable }?.let { return it }
+        return activeRoot()?.let { findFirstEditable(it, 0) }
     }
 
     private fun findFirstEditable(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
-        if (depth > MAX_DEPTH || !node.isVisibleToUser) return null
+        if (depth > MAX_DEPTH) return null
         if (node.isEditable) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -232,51 +261,50 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     suspend fun tap(x: Int, y: Int): ActionResult {
+        blockedResult()?.let { return it }
         checkPoint(x, y)?.let { return it }
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        return if (dispatchStroke(path, TAP_MS)) ActionResult.ok("Tapped ($x, $y)")
-        else ActionResult.fail("Tap at ($x, $y) was cancelled.")
+        return if (dispatchStroke(path, TAP_MS)) ActionResult.ok("Tapped ($x,$y)")
+        else ActionResult.fail("Tap gesture failed")
     }
 
     suspend fun longPress(x: Int, y: Int): ActionResult {
+        blockedResult()?.let { return it }
         checkPoint(x, y)?.let { return it }
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        return if (dispatchStroke(path, LONG_PRESS_MS)) ActionResult.ok("Long-pressed ($x, $y)")
-        else ActionResult.fail("Long press at ($x, $y) was cancelled.")
+        return if (dispatchStroke(path, LONG_PRESS_MS)) ActionResult.ok("Long-pressed ($x,$y)")
+        else ActionResult.fail("Long-press failed")
     }
 
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long = SWIPE_MS): ActionResult {
+        blockedResult()?.let { return it }
         checkPoint(x1, y1)?.let { return it }
         checkPoint(x2, y2)?.let { return it }
         val path = Path().apply {
             moveTo(x1.toFloat(), y1.toFloat())
             lineTo(x2.toFloat(), y2.toFloat())
         }
-        return if (dispatchStroke(path, durationMs)) ActionResult.ok("Swiped ($x1,$y1) to ($x2,$y2)")
-        else ActionResult.fail("Swipe was cancelled.")
+        return if (dispatchStroke(path, durationMs)) ActionResult.ok("Swiped")
+        else ActionResult.fail("Swipe failed")
     }
 
     suspend fun scroll(direction: ScrollDirection): ActionResult {
+        blockedResult()?.let { return it }
         val (w, h) = screenSize()
-        val cx = w / 2
-        val cy = h / 2
-        val dx = (w * 0.3f).toInt()
-        val dy = (h * 0.3f).toInt()
-        val result = when (direction) {
-            ScrollDirection.DOWN -> swipe(cx, cy + dy, cx, cy - dy, SCROLL_MS)
-            ScrollDirection.UP -> swipe(cx, cy - dy, cx, cy + dy, SCROLL_MS)
-            ScrollDirection.RIGHT -> swipe(cx + dx, cy, cx - dx, cy, SCROLL_MS)
-            ScrollDirection.LEFT -> swipe(cx - dx, cy, cx + dx, cy, SCROLL_MS)
+        val (x1, y1, x2, y2) = when (direction) {
+            ScrollDirection.UP -> listOf(w / 2, (h * 0.7).toInt(), w / 2, (h * 0.3).toInt())
+            ScrollDirection.DOWN -> listOf(w / 2, (h * 0.3).toInt(), w / 2, (h * 0.7).toInt())
+            ScrollDirection.LEFT -> listOf((w * 0.7).toInt(), h / 2, (w * 0.3).toInt(), h / 2)
+            ScrollDirection.RIGHT -> listOf((w * 0.3).toInt(), h / 2, (w * 0.7).toInt(), h / 2)
         }
-        return if (result.success) ActionResult.ok("Scrolled ${direction.name.lowercase()}") else result
+        return swipe(x1, y1, x2, y2, SCROLL_MS)
     }
 
     private suspend fun dispatchStroke(path: Path, durationMs: Long): Boolean {
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L)))
-            .build()
+        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return suspendCancellableCoroutine { cont ->
-            val callback = object : AccessibilityService.GestureResultCallback() {
+            val ok = dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     if (cont.isActive) cont.resume(true)
                 }
@@ -284,16 +312,17 @@ class JarvisAccessibilityService : AccessibilityService() {
                 override fun onCancelled(gestureDescription: GestureDescription?) {
                     if (cont.isActive) cont.resume(false)
                 }
-            }
-            if (!dispatchGesture(gesture, callback, null) && cont.isActive) cont.resume(false)
+            }, null)
+            if (!ok && cont.isActive) cont.resume(false)
         }
     }
 
     private fun checkPoint(x: Int, y: Int): ActionResult? {
-        blockedResult()?.let { return it }
         val (w, h) = screenSize()
-        return if (x in 0 until w && y in 0 until h) null
-        else ActionResult.fail("($x, $y) is outside the ${w}x${h} screen.")
+        if (x !in 0 until w || y !in 0 until h) {
+            return ActionResult.fail("Point ($x,$y) outside screen ${w}x$h")
+        }
+        return null
     }
 
     fun globalAction(command: GlobalCommand): ActionResult {
@@ -337,6 +366,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (failure != null) return@withContext failure
 
         if (awaitForegroundPackage(app.packageName, LAUNCH_TIMEOUT_MS)) {
+            awaitRootReady(ROOT_WAIT_TIMEOUT_MS)
+            awaitUiSettled(500L, 3000L)
             ActionResult.ok("Opened ${app.label}")
         } else {
             ActionResult.fail(
@@ -389,12 +420,41 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private suspend fun awaitRoot(): AccessibilityNodeInfo? {
-        repeat(ROOT_RETRIES) {
-            rootInActiveWindow?.let { return it }
+    private fun activeRoot(): AccessibilityNodeInfo? {
+        rootInActiveWindow?.let { return it }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                val wins = windows ?: return null
+                wins.firstOrNull { it.isActive }?.root?.let { return it }
+                wins.firstOrNull {
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+                }?.root?.let { return it }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private suspend fun awaitRoot(timeoutMs: Long = ROOT_WAIT_TIMEOUT_MS): AccessibilityNodeInfo? {
+        val start = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - start < timeoutMs) {
+            activeRoot()?.let { return it }
             delay(ROOT_RETRY_DELAY_MS)
         }
         return null
+    }
+
+    suspend fun awaitRootReady(timeoutMs: Long = ROOT_WAIT_TIMEOUT_MS): Boolean {
+        val start = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - start < timeoutMs) {
+            val root = activeRoot()
+            val pkg = root?.packageName?.toString()
+            if (root != null && (pkg == null || pkg !in blockedPackages)) {
+                return true
+            }
+            delay(ROOT_RETRY_DELAY_MS)
+        }
+        return activeRoot() != null
     }
 
     private fun blockedResult(): ActionResult? {
@@ -441,13 +501,14 @@ class JarvisAccessibilityService : AccessibilityService() {
         private const val MAX_DEPTH = 30
         private const val MAX_TEXT = 200
         private const val MAX_PARENT_HOPS = 5
-        private const val ROOT_RETRIES = 6
-        private const val ROOT_RETRY_DELAY_MS = 120L
+        private const val ROOT_RETRY_DELAY_MS = 150L
+        private const val ROOT_WAIT_TIMEOUT_MS = 5_000L
+        private const val INSPECT_TIMEOUT_MS = 4_000L
         private const val TAP_MS = 50L
         private const val LONG_PRESS_MS = 800L
         private const val SWIPE_MS = 300L
         private const val SCROLL_MS = 350L
-        private const val LAUNCH_TIMEOUT_MS = 4000L
+        private const val LAUNCH_TIMEOUT_MS = 5_000L
 
         private val _instance = MutableStateFlow<JarvisAccessibilityService?>(null)
 
