@@ -201,8 +201,10 @@ class TaskEngine(
                     return
                 }
                 service.awaitUiSettled(600, 5000)
+                service.awaitRootReady(5_000L)
             } else {
                 Log.i(TAG, "YOUTUBE_ALREADY_FG id=$taskId pkg=$fg")
+                service.awaitRootReady(2_000L)
             }
             effectiveObjective = mediaIntent.toAgentObjective()
             Log.i(TAG, "MEDIA_INTENT id=$taskId kind=${mediaIntent.kind} q=${mediaIntent.query}")
@@ -222,8 +224,13 @@ class TaskEngine(
                 _status.value = _status.value.copy(state = AgentState.THINKING, step = step, lastThought = "Planning $step…", taskId = taskId)
                 Log.i(TAG, "TASK_PLANNING id=$taskId step=$step/$MAX_STEPS")
 
-                val snapshot = service.inspectScreen()
-                val screenText = snapshot?.toPrompt() ?: "[NO SCREEN]"
+                var snapshot = service.inspectScreen()
+                if (snapshot.rootUnavailable || (snapshot.nodes.isEmpty() && !snapshot.blocked)) {
+                    service.awaitUiSettled(400, 2000)
+                    service.awaitRootReady(2_500L)
+                    snapshot = service.inspectScreen()
+                }
+                val screenText = snapshot.toPrompt()
                 val conversation = conversationStore.recent(4)
                 val userPrompt = AgentPrompts.userTurn(effectiveObjective, step, maxSteps, history, conversation, userReplies.toList(), screenText)
 
@@ -384,7 +391,6 @@ class TaskEngine(
             val r = service.globalAction(GlobalCommand.BACK)
             return LocalResult(r.success, if (r.success) "Back kar diya." else r.message)
         }
-        // Song/play commands must not be treated as open-app
         if (MediaPlayIntent.isMediaCommand(objective)) {
             return null
         }
@@ -403,7 +409,7 @@ class TaskEngine(
             if (!open.success) return LocalResult(false, open.message)
             service.awaitUiSettled(500, 3000)
             val snap = service.inspectScreen()
-            val wifiNode = snap?.nodes?.firstOrNull { n ->
+            val wifiNode = snap.nodes.firstOrNull { n ->
                 val blob = listOfNotNull(n.text, n.contentDescription, n.viewId).joinToString(" ").lowercase()
                 blob.contains("wifi") || blob.contains("wi-fi") || blob.contains("network")
             }
