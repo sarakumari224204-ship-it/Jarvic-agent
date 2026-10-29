@@ -92,7 +92,7 @@ class JarvisForegroundService : LifecycleService() {
         }
 
         speechRecognizer.start()
-        Log.i(TAG, "Service started")
+        Log.i(TAG, "SERVICE_STARTED")
     }
 
     private fun scheduleResumeListening() {
@@ -109,34 +109,44 @@ class JarvisForegroundService : LifecycleService() {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
+        val reject = inputGuard.rejectReason(trimmed)
+        if (reject != null) {
+            Log.i(TAG, "INPUT_REJECTED reason=$reject text=$trimmed")
+            return
+        }
+
         val status = taskEngine.status.value
         Log.i(TAG, "handleUtterance state=${status.state} taskId=${status.taskId} text=$trimmed")
 
-        if (status.state == AgentState.WAITING_USER) {
-            taskEngine.provideUserReply(trimmed)
-            return
+        when (status.state) {
+            AgentState.WAITING_USER -> {
+                inputGuard.markAccepted(trimmed)
+                taskEngine.provideUserReply(trimmed)
+            }
+            AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
+                if (taskEngine.isBusy()) {
+                    Log.i(TAG, "INPUT_REJECTED reason=busy text=$trimmed")
+                    return
+                }
+                inputGuard.markAccepted(trimmed)
+                resumeJob?.cancel()
+                speechRecognizer.pause()
+                val id = taskEngine.start(trimmed)
+                Log.i(TAG, "TASK_DISPATCH id=$id text=$trimmed")
+            }
+            AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {
+                Log.i(TAG, "IGNORED_BUSY state=${status.state} text=$trimmed")
+            }
         }
-
-        if (taskEngine.isBusy()) {
-            Log.w(TAG, "Busy — drop utterance")
-            return
-        }
-
-        if (!inputGuard.shouldAccept(trimmed)) {
-            Log.w(TAG, "InputGuard rejected")
-            return
-        }
-
-        taskEngine.start(trimmed)
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "SERVICE_DESTROY")
         resumeJob?.cancel()
         speechRecognizer.shutdown()
         taskEngine.shutdown()
         JarvisRuntime.setServiceRunning(false)
         super.onDestroy()
-        Log.i(TAG, "Service destroyed")
     }
 
     private fun startForegroundCompat() {
