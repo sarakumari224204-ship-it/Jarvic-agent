@@ -18,7 +18,8 @@ class ScreenSnapshotTest {
         val p = s.toPrompt()
         assertTrue(p.contains("SCREEN_LOADING"))
         assertTrue(p.contains("wait"))
-        assertFalse(p.lowercase().contains("accessibility is disabled"))
+        assertFalse(p.startsWith("[BLOCKED]"))
+        assertTrue(p.contains("Do NOT claim accessibility is disabled"))
     }
 
     @Test
