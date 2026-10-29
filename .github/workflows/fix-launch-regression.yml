@@ -1,0 +1,41 @@
+name: Fix Launch App Regression
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/fix_launch_app_regression.py'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply launchApp fix
+        run: |
+          set -euo pipefail
+          python3 scripts/fix_launch_app_regression.py
+          ! grep -A2 'suspend fun launchApp' app/src/main/java/com/jarvis/os/accessibility/JarvisAccessibilityService.kt | grep -q 'blockedResult()?.let'
+          grep -q 'awaitForegroundPackage' app/src/main/java/com/jarvis/os/accessibility/JarvisAccessibilityService.kt
+          grep -q 'ACTION_MAIN' app/src/main/java/com/jarvis/os/accessibility/JarvisAccessibilityService.kt
+          grep -q 'MODE_SCREEN_READ' app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+          ! grep -q 'Agent loop incomplete' app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+          ! grep -q '^PLACEHOLDER$' app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+          echo "Verification OK"
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/jarvis/os/accessibility/JarvisAccessibilityService.kt
+          if git diff --cached --quiet; then
+            echo "No change"
+            exit 0
+          fi
+          git commit -m "Fix app launch regression while preserving screen read"
+          git push origin HEAD:main
