@@ -151,6 +151,9 @@ object AppResolver {
         val raw = objective.trim()
         if (raw.isEmpty()) return null
 
+        // Media play/search is not a simple open_app
+        if (MediaPlayIntent.isMediaCommand(raw)) return null
+
         var work = normalize(raw)
         if (work.isEmpty()) return null
 
