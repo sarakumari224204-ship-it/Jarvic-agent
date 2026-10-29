@@ -41,7 +41,6 @@ import com.jarvis.os.domain.memory.PersonalitySettings
 import com.jarvis.os.domain.memory.SaraInstruction
 import com.jarvis.os.domain.memory.SaraMemory
 import com.jarvis.os.domain.memory.TeachSnapshot
-import java.util.UUID
 
 private enum class TeachTab { TEACH, MEMORY, KNOWLEDGE, PERSONALITY, SETTINGS }
 
@@ -125,7 +124,7 @@ fun TeachSaraScreen(
             Spacer(modifier = Modifier.height(8.dp))
             searchHits.take(10).forEach { hit ->
                 Text(
-                    "${hit.kind}: ${hit.preview}",
+                    "${hit.type}: ${hit.snippet}",
                     color = JarvisMuted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -188,7 +187,7 @@ private fun TeachTabContent(
             val t = text.trim()
             if (t.isEmpty()) return@Button
             when (mode) {
-                "instruction" -> onSaveInstruction(SaraInstruction(text = t))
+                "instruction" -> onSaveInstruction(SaraInstruction(title = t.take(40), text = t))
                 "memory" -> onSaveMemory(SaraMemory(text = t, category = MemoryCategory.OTHER))
                 else -> onSaveKnowledgeNote("Note", t)
             }
@@ -205,7 +204,7 @@ private fun MemoryTabContent(
     onDeleteMemory: (String) -> Unit,
     onClearMemories: () -> Unit
 ) {
-    Row(Modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text("Memories (${snapshot.memories.size})", color = JarvisCyan, fontFamily = FontFamily.Monospace)
         TextButton(onClick = onClearMemories) { Text("CLEAR ALL", color = Color(0xFFFF5252), fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
     }
@@ -295,7 +294,7 @@ private fun SettingsTabContent(settings: MemorySettings, onToggle: (Boolean) -> 
     Spacer(modifier = Modifier.height(8.dp))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Text("Memory enabled", color = JarvisOnSurface, fontFamily = FontFamily.Monospace)
-        Switch(checked = settings.enabled, onCheckedChange = onToggle)
+        Switch(checked = settings.memoryEnabled, onCheckedChange = onToggle)
     }
     Spacer(modifier = Modifier.height(12.dp))
     Button(onClick = onExport, colors = ButtonDefaults.buttonColors(containerColor = JarvisSurface, contentColor = JarvisCyan), modifier = Modifier.fillMaxWidth()) {

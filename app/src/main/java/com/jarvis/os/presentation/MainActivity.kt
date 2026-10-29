@@ -49,8 +49,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private var pendingDocumentImport: (() -> Unit)? = null
-
     private val documentPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -72,11 +70,10 @@ class MainActivity : ComponentActivity() {
             result.fold(
                 onSuccess = { spec ->
                     val item = KnowledgeItem(
-                        id = java.util.UUID.randomUUID().toString(),
                         title = spec.displayName,
                         type = spec.type,
-                        sourcePath = spec.localPath,
-                        createdAt = System.currentTimeMillis()
+                        source = spec.localPath,
+                        contentRef = spec.localPath
                     )
                     container.memoryStore.upsertKnowledge(item)
                     container.knowledgeIndexer.index(item).fold(
@@ -106,8 +103,8 @@ class MainActivity : ComponentActivity() {
             val aiMode by container.keyStore.aiMode.collectAsState(initial = AIMode.AUTO)
             val installedModelIds by container.offlineModelManager.installedModelIds.collectAsState(initial = emptySet())
             val selectedModelId by container.offlineModelManager.selectedModelId.collectAsState(initial = null)
-            val downloadProgress by container.offlineModelManager.progress.collectAsState()
-            val teachSnapshot by container.memoryStore.snapshot.collectAsState()
+            val downloadProgress by container.offlineModelManager.progress.collectAsState(initial = ModelDownloadProgress())
+            val teachSnapshot by container.memoryStore.snapshot.collectAsState(initial = TeachSnapshot())
             var showTeach by remember { mutableStateOf(false) }
             var searchHits by remember { mutableStateOf(emptyList<com.jarvis.os.data.memory.MemoryStore.SearchHit>()) }
 
@@ -135,11 +132,10 @@ class MainActivity : ComponentActivity() {
                         onSaveKnowledgeNote = { title, text ->
                             lifecycleScope.launch {
                                 val item = KnowledgeItem(
-                                    id = java.util.UUID.randomUUID().toString(),
-                                    title = title,
+                                    title = title.ifBlank { "Note" },
                                     type = KnowledgeType.TEXT,
-                                    text = text,
-                                    createdAt = System.currentTimeMillis()
+                                    source = "note",
+                                    contentRef = text
                                 )
                                 container.memoryStore.upsertKnowledge(item)
                                 container.knowledgeIndexer.index(item)
@@ -148,11 +144,10 @@ class MainActivity : ComponentActivity() {
                         onSaveKnowledgeUrl = { title, url ->
                             lifecycleScope.launch {
                                 val item = KnowledgeItem(
-                                    id = java.util.UUID.randomUUID().toString(),
-                                    title = title,
+                                    title = title.ifBlank { url.take(40) },
                                     type = KnowledgeType.URL,
-                                    sourceUrl = url,
-                                    createdAt = System.currentTimeMillis()
+                                    source = url,
+                                    contentRef = url
                                 )
                                 container.memoryStore.upsertKnowledge(item)
                                 container.knowledgeIndexer.index(item).onFailure {
@@ -175,7 +170,7 @@ class MainActivity : ComponentActivity() {
                         onToggleMemoryEnabled = { enabled ->
                             lifecycleScope.launch {
                                 container.memoryStore.saveSettings(
-                                    container.memoryStore.current().settings.copy(enabled = enabled)
+                                    container.memoryStore.current().settings.copy(memoryEnabled = enabled)
                                 )
                             }
                         },
@@ -198,7 +193,7 @@ class MainActivity : ComponentActivity() {
                         aiMode = aiMode,
                         installedModelIds = installedModelIds,
                         selectedModelId = selectedModelId,
-                        downloadProgress = downloadProgress ?: ModelDownloadProgress(),
+                        downloadProgress = downloadProgress,
                         freeSpaceLabel = {
                             try {
                                 val bytes = container.offlineModelManager.freeSpaceBytes()
