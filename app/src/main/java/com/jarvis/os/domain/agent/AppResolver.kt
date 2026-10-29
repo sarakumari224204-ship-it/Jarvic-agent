@@ -16,7 +16,6 @@ object AppResolver {
         "youtube" to listOf("youtube"),
         "yt" to listOf("youtube"),
         "यूट्यूब" to listOf("youtube"),
-        "यू ट्यूब" to listOf("youtube"),
         "whatsapp" to listOf("whatsapp"),
         "whats app" to listOf("whatsapp"),
         "वाट्सएप" to listOf("whatsapp"),
@@ -30,7 +29,6 @@ object AppResolver {
         "google chrome" to listOf("chrome"),
         "क्रोम" to listOf("chrome"),
         "gmail" to listOf("gmail"),
-        "google mail" to listOf("gmail"),
         "जीमेल" to listOf("gmail"),
         "telegram" to listOf("telegram"),
         "टेलीग्राम" to listOf("telegram"),
@@ -38,38 +36,27 @@ object AppResolver {
         "fb" to listOf("facebook"),
         "फेसबुक" to listOf("facebook"),
         "spotify" to listOf("spotify"),
-        "स्पॉटिफाई" to listOf("spotify"),
         "settings" to listOf("settings"),
         "setting" to listOf("settings"),
         "सेटिंग्स" to listOf("settings"),
-        "सेटिंग" to listOf("settings"),
         "maps" to listOf("maps", "map"),
-        "google maps" to listOf("maps"),
-        "मैप्स" to listOf("maps"),
-        "phone" to listOf("phone", "dialer", "call"),
-        "dialer" to listOf("phone", "dialer"),
+        "phone" to listOf("phone", "dialer"),
         "फोन" to listOf("phone", "dialer"),
-        "messages" to listOf("messages", "messaging"),
-        "sms" to listOf("messages", "messaging"),
-        "message" to listOf("messages"),
-        "मेसेज" to listOf("messages"),
+        "messages" to listOf("messages"),
         "camera" to listOf("camera"),
-        "कैमरा" to listOf("camera"),
         "gallery" to listOf("gallery", "photos"),
         "photos" to listOf("photos", "gallery"),
-        "गैलरी" to listOf("gallery", "photos"),
         "netflix" to listOf("netflix"),
-        "नेटफ्लिक्स" to listOf("netflix"),
         "calculator" to listOf("calculator"),
-        "calc" to listOf("calculator"),
-        "कैलकुलेटर" to listOf("calculator"),
-        "contacts" to listOf("contacts"),
-        "contact" to listOf("contacts"),
-        "कॉन्टैक्ट्स" to listOf("contacts"),
-        "play store" to listOf("play store", "playstore"),
-        "playstore" to listOf("play store", "playstore"),
-        "प्ले स्टोर" to listOf("play store")
+        "contacts" to listOf("contacts")
     )
+
+    private val OPEN_SUFFIXES = listOf(
+        " kholo", " khol do", " khol dena", " open karo", " start karo",
+        " chalao", " chala do", " खोलो", " खोल दो", " चलाओ"
+    )
+
+    private val OPEN_PREFIXES = listOf("open ", "launch ", "start ")
 
     fun normalize(s: String): String =
         s.lowercase()
@@ -131,22 +118,22 @@ object AppResolver {
     fun extractOpenTarget(objective: String): String? {
         val raw = objective.trim()
         if (raw.isEmpty()) return null
-        val t = raw.lowercase()
-        val patterns = listOf(
-            Regex("""(?:open|launch|start)\s+(.+)""", RegexOption.IGNORE_CASE),
-            Regex("""(.+?)\s*(?:kholo|khol\s*do|khol\s*dena|khol\s*diya|open\s*karo|start\s*karo|chalao|chala\s*do)""", RegexOption.IGNORE_CASE),
-            Regex("""(.+?)\s*(?:खोलो|खोल\s*दो|चलाओ)""")
-        )
-        for (p in patterns) {
-            val m = p.find(raw) ?: p.find(t) ?: continue
-            var name = m.groupValues[1].trim()
-            name = name.removePrefix("the ").removePrefix("app ").trim()
-            name = name.removeSuffix(" app").removeSuffix(" application").trim()
-            name = name.replace(Regex("""\s+(please|pls|karo|do|dena)$""", RegexOption.IGNORE_CASE), "").trim()
-            if (name.length in 2..40) {
-                val lower = name.lowercase()
-                if (lower.contains("wifi") || lower.contains("wi-fi")) continue
-                return name
+        val lower = raw.lowercase()
+
+        for (suffix in OPEN_SUFFIXES) {
+            val s = suffix.lowercase()
+            if (lower.endsWith(s) || raw.endsWith(suffix)) {
+                val name = raw.dropLast(suffix.length).trim()
+                    .removePrefix("the ").removePrefix("app ")
+                    .removeSuffix(" app").trim()
+                if (name.length in 2..40 && !name.lowercase().contains("wifi")) return name
+            }
+        }
+        for (prefix in OPEN_PREFIXES) {
+            if (lower.startsWith(prefix)) {
+                val name = raw.substring(prefix.length).trim()
+                    .removeSuffix(" app").removeSuffix(" application").trim()
+                if (name.length in 2..40 && !name.lowercase().contains("wifi")) return name
             }
         }
         val n = normalize(raw)
