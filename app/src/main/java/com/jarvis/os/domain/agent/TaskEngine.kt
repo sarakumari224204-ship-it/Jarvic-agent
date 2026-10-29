@@ -219,8 +219,172 @@ class TaskEngine(
         val model = SecureKeyStore.migrateModel(settings.geminiModel.ifBlank { ApiDefaults.GEMINI_MODEL })
         Log.i(TAG, "TASK_PLANNING id=$taskId model=$model")
 
-        // FULL AGENT LOOP CONTINUES IN NEXT COMMIT IF SIZE LIMITED - PLACEHOLDER MARKER FOR COMPLETENESS CHECK
-        speakAndFinish(taskId, "Agent loop incomplete - push full file", failed = true)
+        val mediaIntent = MediaPlayIntent.parse(objective)
+        var effectiveObjective = objective
+        if (mediaIntent != null) {
+            val ytPkgs = setOf(
+                "com.google.android.youtube",
+                "com.google.android.apps.youtube.music"
+            )
+            val fg = service.currentPackage()
+            if (fg == null || fg !in ytPkgs) {
+                _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening YouTube")
+                val open = service.launchApp("YouTube")
+                if (!open.success) {
+                    speakAndFinish(taskId, open.message.ifBlank { "YouTube open nahi ho paya." }, failed = true)
+                    return
+                }
+                service.awaitUiSettled(600, 5000)
+                service.awaitRootReady(5_000L)
+            } else {
+                Log.i(TAG, "YOUTUBE_ALREADY_FG id=$taskId pkg=$fg")
+                service.awaitRootReady(2_000L)
+            }
+            effectiveObjective = mediaIntent.toAgentObjective()
+            Log.i(TAG, "MEDIA_INTENT id=$taskId kind=${mediaIntent.kind} q=${mediaIntent.query}")
+        }
+
+        val history = mutableListOf<String>()
+        var step = 0
+        var typeTextCount = 0
+        var lastTypedOutbound: String? = null
+        var sendConfirmAsked = false
+        val maxSteps = if (mediaIntent != null) 12 else MAX_STEPS
+
+        _status.value = AgentStatus(state = AgentState.THINKING, objective = effectiveObjective, step = 0, maxSteps = maxSteps, lastThought = "Using $model", taskId = taskId)
+        conversationStore.append(ChatMessage(ChatRole.USER, objective))
+
+        try {
+            while (scope.isActive && step < maxSteps) {
+                step++
+                _status.value = _status.value.copy(state = AgentState.THINKING, step = step, lastThought = "Planning $step…", taskId = taskId)
+                Log.i(TAG, "TASK_PLANNING id=$taskId step=$step/$MAX_STEPS")
+
+                var snapshot = service.inspectScreen()
+                if (snapshot.rootUnavailable || (snapshot.nodes.isEmpty() && !snapshot.blocked)) {
+                    service.awaitUiSettled(400, 2000)
+                    service.awaitRootReady(2_500L)
+                    snapshot = service.inspectScreen()
+                }
+                val screenText = snapshot.toPrompt()
+                val conversation = conversationStore.recent(4)
+                val userPrompt = AgentPrompts.userTurn(effectiveObjective, step, maxSteps, history, conversation, userReplies.toList(), screenText)
+
+                var raw = callGemini(apiKey, model, effectiveObjective, userPrompt)
+                var parsed = AgentDecisionParser.parse(raw)
+                if (parsed.isFailure) {
+                    val repair = AgentPrompts.repairTurn(parsed.exceptionOrNull()?.message ?: "parse error")
+                    raw = callGemini(apiKey, model, effectiveObjective, "$userPrompt\n$repair")
+                    parsed = AgentDecisionParser.parse(raw)
+                }
+                if (parsed.isFailure) {
+                    Log.w(TAG, "PARSE_FAIL id=$taskId step=$step")
+                    history += "step $step: INVALID_REPLY"
+                    continue
+                }
+
+                val stepResult = parsed.getOrThrow()
+                Log.i(TAG, "ACTION_SELECTED id=$taskId ${stepResult.action.describe()}")
+
+                if (stepResult.action is AgentAction.TypeText) {
+                    typeTextCount++
+                    lastTypedOutbound = stepResult.action.text
+                    if (typeTextCount > 2) {
+                        speakAndFinish(taskId, "Message type limit. Dobara bolo agar bhejna hai.", failed = true)
+                        return
+                    }
+                }
+
+                if (stepResult.action is AgentAction.PressEnter &&
+                    MessageSendGuard.blockUnconfirmedSend(
+                        objective = objective,
+                        typedOutbound = typeTextCount > 0,
+                        userReplies = userReplies,
+                        alreadyAskedConfirm = sendConfirmAsked
+                    )
+                ) {
+                    if (userReplies.any { MessageSendGuard.isUserDenial(it) }) {
+                        speakAndFinish(taskId, "Theek hai, message nahi bheja.", failed = false)
+                        return
+                    }
+                    if (!userReplies.any { MessageSendGuard.isUserConfirmation(it) }) {
+                        sendConfirmAsked = true
+                        val prompt = MessageSendGuard.confirmationPrompt(lastTypedOutbound)
+                        history += "step $step: press_enter blocked → ask_user confirm"
+                        _status.value = _status.value.copy(
+                            state = AgentState.WAITING_USER,
+                            speech = prompt,
+                            lastThought = "confirm send",
+                            taskId = taskId
+                        )
+                        safeSpeak(prompt)
+                        val before = userReplies.size
+                        var waited = 0
+                        while (userReplies.size == before && waited < 25_000 && scope.isActive) {
+                            delay(300); waited += 300
+                        }
+                        if (userReplies.size == before) {
+                            speakAndFinish(taskId, "Confirm nahi mila. Message nahi bheja.", failed = true)
+                            return
+                        }
+                        if (userReplies.any { MessageSendGuard.isUserDenial(it) }) {
+                            speakAndFinish(taskId, "Theek hai, message nahi bheja.", failed = false)
+                            return
+                        }
+                        if (!userReplies.any { MessageSendGuard.isUserConfirmation(it) }) {
+                            speakAndFinish(taskId, "Clear haan/nahi nahi mila. Message nahi bheja.", failed = true)
+                            return
+                        }
+                    }
+                }
+
+                _status.value = _status.value.copy(lastThought = stepResult.thought, state = AgentState.ACTING, taskId = taskId)
+                val actionResult = execute(service, stepResult.action)
+                Log.i(TAG, "ACTION_EXECUTED id=$taskId success=${actionResult.success} ${actionResult.message}")
+                history += "step $step: ${stepResult.action.describe()} → ${actionResult.message}"
+                _status.value = _status.value.copy(lastResult = actionResult.message)
+
+                if (actionResult.success) {
+                    when (stepResult.action) {
+                        is AgentAction.OpenApp, is AgentAction.Click, is AgentAction.Tap,
+                        is AgentAction.Global, is AgentAction.TypeText, is AgentAction.PressEnter -> service.awaitUiSettled()
+                        else -> Unit
+                    }
+                }
+
+                when (val action = stepResult.action) {
+                    is AgentAction.Finish -> {
+                        speakAndFinish(taskId, action.speech.ifBlank { "Ho gaya." })
+                        return
+                    }
+                    is AgentAction.Fail -> {
+                        speakAndFinish(taskId, action.speech.ifBlank { "Ye kaam nahi ho paya." }, failed = true)
+                        return
+                    }
+                    is AgentAction.AskUser -> {
+                        _status.value = _status.value.copy(state = AgentState.WAITING_USER, speech = action.speech, taskId = taskId)
+                        safeSpeak(action.speech)
+                        val before = userReplies.size
+                        var waited = 0
+                        while (userReplies.size == before && waited < 25_000 && scope.isActive) {
+                            delay(300); waited += 300
+                        }
+                        if (userReplies.size == before) {
+                            speakAndFinish(taskId, "Reply nahi mila.", failed = true)
+                            return
+                        }
+                    }
+                    AgentAction.Wait -> { delay(400); service.awaitUiSettled() }
+                    else -> service.awaitUiSettled()
+                }
+            }
+            speakAndFinish(taskId, "Steps limit. Short command try karo.", failed = true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "TASK_FAILED id=$taskId exception", e)
+            speakAndFinish(taskId, "Error: ${e.message ?: "unknown"}", failed = true)
+        }
     }
 
     private suspend fun runConversationOnce(taskId: Long, objective: String, mode: AIMode, geminiKey: String?, screenContext: String? = null) {
@@ -285,17 +449,6 @@ class TaskEngine(
         return raw.take(280)
     }
 
-    private fun looksLikeDeviceAction(objective: String): Boolean {
-        if (MemoryCommand.parse(objective) != null) return false
-        return IntentClassifier.isDeviceLike(objective)
-    }
-
-    private data class LocalResult(val ok: Boolean, val text: String)
-
-    private suspend fun tryLocalCommand(service: JarvisAccessibilityService, objective: String): LocalResult? {
-        return null
-    }
-
     private fun buildScreenReadContext(snap: com.jarvis.os.accessibility.ScreenSnapshot): String {
         if (snap.rootUnavailable) {
             return "PACKAGE: ${snap.packageName ?: "unknown"}\nSTATUS: SCREEN_LOADING (root not ready yet)"
@@ -327,6 +480,102 @@ class TaskEngine(
         }
         return lines.joinToString("\n")
     }
+
+    private fun looksLikeDeviceAction(objective: String): Boolean {
+        if (MemoryCommand.parse(objective) != null) return false
+        return IntentClassifier.isDeviceLike(objective)
+    }
+
+    private data class LocalResult(val ok: Boolean, val text: String)
+
+    private suspend fun tryLocalCommand(service: JarvisAccessibilityService, objective: String): LocalResult? {
+        val t = objective.trim().lowercase()
+        if (t.matches(Regex(".*\\b(home|homescreen|ghar|होम)\\b.*")) &&
+            (t.contains("jao") || t.contains("jaao") || t.contains("go") || t.contains("khol") || t.length < 12)
+        ) {
+            val r = service.globalAction(GlobalCommand.HOME)
+            return LocalResult(r.success, if (r.success) "Home screen par aa gaye." else r.message)
+        }
+        if (t.matches(Regex(".*\\b(back|peeche|पीछे|वापस)\\b.*")) && t.length < 24) {
+            val r = service.globalAction(GlobalCommand.BACK)
+            return LocalResult(r.success, if (r.success) "Back kar diya." else r.message)
+        }
+        if (MediaPlayIntent.isMediaCommand(objective)) {
+            return null
+        }
+        val appTarget = extractOpenAppTarget(objective)
+        if (appTarget != null) {
+            _status.value = _status.value.copy(state = AgentState.ACTING, lastThought = "Opening $appTarget")
+            val result = service.launchApp(appTarget)
+            val speech = when {
+                result.success -> result.message.ifBlank { "$appTarget khol diya." }
+                else -> result.message.ifBlank { "$appTarget nahi khul paya." }
+            }
+            return LocalResult(result.success, speech)
+        }
+        if ((t.contains("wifi") || t.contains("wi-fi")) && (t.contains("setting") || t.contains("khol") || t.contains("open"))) {
+            val open = service.launchApp("Settings")
+            if (!open.success) return LocalResult(false, open.message)
+            service.awaitUiSettled(500, 3000)
+            val snap = service.inspectScreen()
+            val wifiNode = snap.nodes.firstOrNull { n ->
+                val blob = listOfNotNull(n.text, n.contentDescription, n.viewId).joinToString(" ").lowercase()
+                blob.contains("wifi") || blob.contains("wi-fi") || blob.contains("network")
+            }
+            if (wifiNode != null) {
+                val click = service.clickNode(wifiNode.id)
+                service.awaitUiSettled()
+                return LocalResult(click.success, if (click.success) "WiFi settings khol diye." else "Settings khule, WiFi option nahi mila.")
+            }
+            return LocalResult(true, "Settings khol diye.")
+        }
+        return null
+    }
+
+    private fun extractOpenAppTarget(objective: String): String? =
+        AppResolver.extractOpenTarget(objective)
+
+    private suspend fun callGemini(apiKey: String, model: String, objective: String, userText: String): String {
+        val result = withTimeoutOrNull(GEMINI_TIMEOUT_MS) {
+            gemini.generateJson(apiKey, model, agentSystemPrompt(objective), userText)
+        }
+        return when (result) {
+            null -> "{\"thought\":\"timeout\",\"action\":\"fail\",\"speech\":\"Network slow.\"}"
+            is ApiResult.Success -> result.value
+            is ApiResult.Failure -> "{\"thought\":\"api error\",\"action\":\"fail\",\"speech\":\"${result.error.message.take(80)}\"}"
+        }
+    }
+
+    private fun agentSystemPrompt(objective: String): String {
+        val assembled = contextAssembler?.assemble(objective)?.systemPrefix
+        return buildString {
+            if (!assembled.isNullOrBlank()) {
+                appendLine(assembled)
+                appendLine()
+            }
+            append(AgentPrompts.SYSTEM)
+        }
+    }
+
+    private suspend fun execute(service: JarvisAccessibilityService, action: AgentAction): ActionResult =
+        withContext(Dispatchers.Default) {
+            when (action) {
+                is AgentAction.OpenApp -> service.launchApp(action.app)
+                is AgentAction.Click -> service.clickNode(action.nodeId)
+                is AgentAction.LongClick -> service.longClickNode(action.nodeId)
+                is AgentAction.TypeText -> service.setText(action.text, action.nodeId, action.append)
+                is AgentAction.PressEnter -> service.pressEnter(action.nodeId)
+                is AgentAction.Scroll -> service.scroll(action.direction)
+                is AgentAction.Tap -> service.tap(action.x, action.y)
+                is AgentAction.Swipe -> service.swipe(action.x, action.y, action.x2, action.y2)
+                is AgentAction.Global -> service.globalAction(action.command)
+                is AgentAction.Dial -> service.dial(action.number, action.placeCall)
+                AgentAction.Wait -> ActionResult.ok("waited")
+                is AgentAction.AskUser -> ActionResult.ok("ask_user")
+                is AgentAction.Finish -> ActionResult.ok(action.speech)
+                is AgentAction.Fail -> ActionResult.fail(action.speech)
+            }
+        }
 
     private suspend fun speakAndFinish(taskId: Long, text: String, failed: Boolean = false) {
         _status.value = _status.value.copy(
