@@ -44,7 +44,8 @@ class JarvisForegroundService : LifecycleService() {
             conversationStore = container.conversationStore,
             modeRouter = container.modeRouter,
             inputGuard = inputGuard,
-            contextAssembler = container.contextAssembler
+            contextAssembler = container.contextAssembler,
+            memoryStore = container.memoryStore
         )
 
         createChannel()
@@ -53,108 +54,76 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             speechRecognizer.results.collectLatest { text ->
-                Log.i(TAG, "SPEECH_RECEIVED source=stt text=$text")
                 handleUtterance(text)
             }
         }
 
         lifecycleScope.launch {
-            speechRecognizer.isListening.collectLatest { listening ->
-                JarvisRuntime.updateListening(listening)
-            }
-        }
-
-        lifecycleScope.launch {
-            speechRecognizer.partialText.collectLatest { partial ->
-                JarvisRuntime.updatePartial(partial)
-            }
-        }
-
-        lifecycleScope.launch {
             taskEngine.status.collectLatest { status ->
-                Log.i(
-                    TAG,
-                    "STATE_TRANSITION state=${status.state} taskId=${status.taskId} step=${status.step} thought=${status.lastThought}"
-                )
-                JarvisRuntime.updateAgentStatus(status)
-                updateNotification(statusText(status.state, status.speech ?: status.lastThought))
-
                 when (status.state) {
-                    AgentState.THINKING,
-                    AgentState.ACTING,
-                    AgentState.SPEAKING,
-                    AgentState.WAITING_USER -> {
-                        resumeJob?.cancel()
+                    AgentState.SPEAKING, AgentState.THINKING, AgentState.ACTING, AgentState.WAITING_USER -> {
                         speechRecognizer.pause()
                     }
-                    AgentState.FINISHED,
-                    AgentState.FAILED,
-                    AgentState.IDLE -> {
-                        resumeJob?.cancel()
-                        resumeJob = lifecycleScope.launch {
-                            delay(2200)
-                            val s = taskEngine.status.value.state
-                            if (s == AgentState.IDLE || s == AgentState.FINISHED || s == AgentState.FAILED) {
-                                Log.i(TAG, "STT_RESUME after task")
-                                speechRecognizer.resume()
-                            }
-                        }
+                    AgentState.FINISHED, AgentState.FAILED, AgentState.IDLE -> {
+                        scheduleResume()
                     }
                 }
+                updateNotification(status.speech ?: status.lastThought ?: "Listening…")
             }
         }
 
         speechRecognizer.start()
-        Log.i(TAG, "SERVICE_STARTED")
+        Log.i(TAG, "Service started")
     }
 
     private fun handleUtterance(text: String) {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
-
-        val reject = inputGuard.rejectReason(trimmed)
-        if (reject != null) {
-            Log.i(TAG, "INPUT_REJECTED reason=$reject text=$trimmed")
+        val cleaned = text.trim()
+        if (cleaned.isEmpty()) return
+        Log.i(TAG, "UTTERANCE: $cleaned")
+        if (!inputGuard.allow(cleaned)) {
+            Log.w(TAG, "InputGuard blocked")
             return
         }
+        if (taskEngine.isBusy()) {
+            if (taskEngine.status.value.state == AgentState.WAITING_USER) {
+                taskEngine.provideUserReply(cleaned)
+            } else {
+                Log.w(TAG, "Busy — drop utterance")
+            }
+            return
+        }
+        taskEngine.start(cleaned)
+    }
 
-        val status = taskEngine.status.value
-        Log.i(TAG, "handleUtterance state=${status.state} taskId=${status.taskId} text=$trimmed")
-
-        when (status.state) {
-            AgentState.WAITING_USER -> {
-                inputGuard.markAccepted(trimmed)
-                taskEngine.provideUserReply(trimmed)
-            }
-            AgentState.IDLE, AgentState.FINISHED, AgentState.FAILED -> {
-                if (taskEngine.isBusy()) {
-                    Log.i(TAG, "INPUT_REJECTED reason=busy text=$trimmed")
-                    return
-                }
-                inputGuard.markAccepted(trimmed)
-                resumeJob?.cancel()
-                speechRecognizer.pause()
-                val id = taskEngine.start(trimmed)
-                Log.i(TAG, "TASK_DISPATCH id=$id text=$trimmed")
-            }
-            AgentState.THINKING, AgentState.ACTING, AgentState.SPEAKING -> {
-                Log.i(TAG, "IGNORED_BUSY state=${status.state} text=$trimmed")
-            }
+    private fun scheduleResume() {
+        resumeJob?.cancel()
+        resumeJob = lifecycleScope.launch {
+            delay(600)
+            if (!taskEngine.isBusy()) speechRecognizer.resume()
         }
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "SERVICE_DESTROY")
-        resumeJob?.cancel()
         speechRecognizer.shutdown()
         taskEngine.shutdown()
         JarvisRuntime.setServiceRunning(false)
         super.onDestroy()
+        Log.i(TAG, "Service destroyed")
+    }
+
+    private fun createChannel() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.notification_channel_name),
+            NotificationManager.IMPORTANCE_LOW
+        )
+        nm.createNotificationChannel(channel)
     }
 
     private fun startForegroundCompat() {
-        val notification = buildNotification(getString(R.string.notif_text))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        val notification = buildNotification("Listening…")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
@@ -173,51 +142,27 @@ class JarvisForegroundService : LifecycleService() {
     private fun buildNotification(content: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle(getString(R.string.notif_title))
-            .setContentText(content)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(content.take(80))
             .setContentIntent(open)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setOngoing(true)
+            .setSilent(true)
             .build()
-    }
-
-    private fun createChannel() {
-        val nm = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.notif_channel_name),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = getString(R.string.notif_channel_desc)
-            setShowBadge(false)
-        }
-        nm.createNotificationChannel(channel)
-    }
-
-    private fun statusText(state: AgentState, detail: String?): String = when (state) {
-        AgentState.IDLE -> getString(R.string.notif_text)
-        AgentState.THINKING -> detail ?: "Thinking…"
-        AgentState.ACTING -> "Acting…"
-        AgentState.SPEAKING -> detail ?: "Speaking…"
-        AgentState.WAITING_USER -> detail ?: "Waiting…"
-        AgentState.FINISHED -> detail ?: "Done."
-        AgentState.FAILED -> detail ?: "Failed."
     }
 
     companion object {
         private const val TAG = "JarvisFgService"
-        private const val CHANNEL_ID = "jarvis_listening"
+        private const val CHANNEL_ID = "jarvis_voice"
         private const val NOTIFICATION_ID = 42
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, JarvisForegroundService::class.java))
+            val intent = Intent(context, JarvisForegroundService::class.java)
+            context.startForegroundService(intent)
         }
 
         fun stop(context: Context) {
