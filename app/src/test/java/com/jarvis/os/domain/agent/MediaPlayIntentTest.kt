@@ -108,4 +108,34 @@ class MediaPlayIntentTest {
         val p = MediaPlayIntent.parse("Believer chalao")!!
         assertTrue(p.toAgentObjective().contains("Haan, gana chala diya"))
     }
+
+    @Test
+    fun ispeAchhaSaSongLagaoIsContextualPlay() {
+        val p = MediaPlayIntent.parse("ispe achha sa song lagao")
+        assertNotNull(p)
+        assertEquals(MediaPlayIntent.Kind.PLAY, p!!.kind)
+        assertTrue(p.contextual)
+    }
+
+    @Test
+    fun lagaoVerbIsPlay() {
+        val p = MediaPlayIntent.parse("Believer lagao")
+        assertNotNull(p)
+        assertEquals(MediaPlayIntent.Kind.PLAY, p!!.kind)
+        assertTrue(p.query.contains("Believer", ignoreCase = true))
+    }
+
+    @Test
+    fun knownAppLagaoStillOpenAppNotMedia() {
+        assertNull(MediaPlayIntent.parse("Spotify lagao"))
+        assertNull(MediaPlayIntent.parse("Instagram lagao"))
+    }
+
+    @Test
+    fun yahanGanaChalaoContextual() {
+        val p = MediaPlayIntent.parse("yahan koi gana chalao")
+        assertNotNull(p)
+        assertEquals(MediaPlayIntent.Kind.PLAY, p!!.kind)
+        assertTrue(p.contextual)
+    }
 }
