@@ -73,7 +73,7 @@ class JarvisForegroundService : LifecycleService() {
 
         lifecycleScope.launch {
             taskEngine.status.collectLatest { status ->
-                JarvisRuntime.updateAgent(status.state.name, status.speech ?: status.lastThought)
+                JarvisRuntime.updateAgentStatus(status)
                 updateNotification(statusText(status.state, status.speech ?: status.lastThought))
                 when (status.state) {
                     AgentState.SPEAKING, AgentState.THINKING, AgentState.ACTING -> {
