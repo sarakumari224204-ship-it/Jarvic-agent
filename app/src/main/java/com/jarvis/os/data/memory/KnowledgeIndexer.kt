@@ -56,25 +56,41 @@ class KnowledgeIndexer(
         return f.readText().take(MAX_DOC_CHARS)
     }
 
-    /**
-     * Best-effort PDF: many PDFs are binary/compressed; we try UTF-8 scrape of stream text.
-     * If extraction is empty, caller reports failure honestly.
-     */
     private fun readPdfBestEffort(path: String): String? {
         val f = File(path)
         if (!f.exists()) return null
-        val bytes = f.readBytes()
-        // Extract parenthesized PDF text operators roughly
+        val bytes = f.readBytes().let { if (it.size > MAX_PDF_BYTES) it.copyOf(MAX_PDF_BYTES) else it }
+        if (looksLikeScannedOrImagePdf(bytes)) {
+            throw IllegalStateException(
+                "Yeh PDF scanned/image-based lagti hai. Text extract nahi hua; OCR abhi support nahi hai."
+            )
+        }
         val raw = bytes.toString(Charsets.ISO_8859_1)
         val matches = Regex("\\((?:\\\\.|[^\\)]){2,200}\\)").findAll(raw)
             .map { it.value.removePrefix("(").removeSuffix(")")
                 .replace("\\n", "\n")
                 .replace("\\r", "")
-                .replace(Regex("\\\\([nrt\\(\\)])"), " ")
+                .replace(Regex("\\\\([nrt\\(\\ )])"), " ")
             }
             .filter { it.any { ch -> ch.isLetter() } }
             .joinToString(" ")
-        return matches.take(MAX_DOC_CHARS).ifBlank { null }
+        val extracted = matches.take(MAX_DOC_CHARS).ifBlank { null }
+        if (extracted == null) {
+            throw IllegalStateException(
+                "PDF se text nahi nikal paya (encrypted, empty, ya image-only). OCR support nahi hai."
+            )
+        }
+        return extracted
+    }
+
+    fun looksLikeScannedOrImagePdf(bytes: ByteArray): Boolean {
+        if (bytes.size < 8) return true
+        val head = bytes.copyOfRange(0, minOf(5, bytes.size)).toString(Charsets.ISO_8859_1)
+        if (!head.startsWith("%PDF")) return false
+        val sample = bytes.toString(Charsets.ISO_8859_1)
+        val textOps = Regex("\\((?:\\\\.|[^\\)]){3,120}\\)").findAll(sample).count()
+        val hasImage = sample.contains("/Image") || sample.contains("/XObject")
+        return textOps < 3 && hasImage
     }
 
     private suspend fun fetchUrl(url: String): String? {
@@ -94,7 +110,6 @@ class KnowledgeIndexer(
             response.bodyAsText()
         } ?: throw IllegalStateException("URL timeout")
 
-        // Strip tags / scripts
         val noScript = body
             .replace(Regex("(?is)<script[^>]*>.*?</script>"), " ")
             .replace(Regex("(?is)<style[^>]*>.*?</style>"), " ")
@@ -147,6 +162,7 @@ class KnowledgeIndexer(
 
     companion object {
         private const val TAG = "KnowledgeIndexer"
+        private const val MAX_PDF_BYTES = 8_000_000
         private const val MAX_DOC_CHARS = 200_000
         private const val MAX_CHUNKS = 80
     }
