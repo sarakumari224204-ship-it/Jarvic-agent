@@ -34,6 +34,9 @@ Rules:
 - Do not ask_user unless you truly need missing info.
 - finish only when the user objective is done; speech = one short sentence in the user's language.
 - If the user only wants a spoken answer (no phone UI action), reply with finish and the answer — do not open apps.
+- YouTube music/play: search icon or search field → type_text query → press_enter → click best result → finish with short Hindi (e.g. "Haan, gana chala diya."). Never treat a song title as a chat message. Do not loop type_text.
+- YouTube search-only (no play): stop after results; do not click a video.
+- If YouTube is already on screen, do not open_app again.
 """.trimIndent()
 
     fun userTurn(
