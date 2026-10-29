@@ -10,7 +10,6 @@ object MediaPlayIntent {
 
     data class Parsed(
         val kind: Kind,
-        /** Free-text query (song/artist). Empty if user said only "gana chalao". */
         val query: String,
         val mentionsYouTube: Boolean
     ) {
@@ -32,9 +31,7 @@ object MediaPlayIntent {
         }
     }
 
-    private val YT_MARKERS = listOf(
-        "youtube", "yt", "यूट्यूब", "यू ट्यूब"
-    )
+    private val YT_MARKERS = listOf("youtube", "yt", "यूट्यूब", "यू ट्यूब")
 
     private val PLAY_VERBS = listOf(
         "chalao", "chala do", "chala dena", "play karo", "play kardo", "play kar do",
@@ -50,6 +47,15 @@ object MediaPlayIntent {
     private val SONG_MARKERS = listOf(
         "gana", "gaana", "song", "music", "track", "audio",
         "गाना", "गाने", "सॉन्ग", "म्यूजिक"
+    )
+
+    private val KNOWN_APP_NAMES = setOf(
+        "youtube", "yt", "whatsapp", "instagram", "insta", "chrome", "gmail",
+        "telegram", "facebook", "fb", "spotify", "settings", "setting",
+        "maps", "phone", "dialer", "messages", "camera", "gallery", "photos",
+        "netflix", "calculator", "contacts",
+        "यूट्यूब", "व्हाट्सऐप", "व्हाट्सएप", "वाट्सएप", "इंस्टाग्राम", "इंस्टा",
+        "क्रोम", "जीमेल", "टेलीग्राम", "फेसबुक", "सेटिंग्स", "सेटिंग", "फोन"
     )
 
     private val MESSAGE_MARKERS = listOf(
@@ -79,6 +85,9 @@ object MediaPlayIntent {
         if (isPlay) {
             val q = extractQuery(raw, lower)
             val titled = q.isNotBlank() && !isOnlyFillerQuery(q)
+            if (titled && isKnownAppName(q) && !hasSongWord) {
+                return null
+            }
             if (mentionsYt || hasSongWord || titled) {
                 if (mentionsYt && !hasSongWord && !titled && isBareAppPlay(lower)) {
                     return null
@@ -98,6 +107,13 @@ object MediaPlayIntent {
             .replace(Regex("\\s+"), " ")
             .trim()
         return stripped.isEmpty() || stripped in listOf("par", "pe", "on", "app", "ko")
+    }
+
+    private fun isKnownAppName(q: String): Boolean {
+        val t = q.lowercase().trim()
+        if (t in KNOWN_APP_NAMES) return true
+        val compact = t.filter { it.isLetterOrDigit() }
+        return KNOWN_APP_NAMES.any { it.filter { ch -> ch.isLetterOrDigit() } == compact }
     }
 
     private fun isOnlyFillerQuery(q: String): Boolean {
