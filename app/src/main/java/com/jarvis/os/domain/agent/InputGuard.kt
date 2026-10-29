@@ -1,6 +1,5 @@
 package com.jarvis.os.domain.agent
 
-import android.util.Log
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -30,7 +29,7 @@ class InputGuard(
         if (norm.isEmpty()) return
         recentEchoes.add(Echo(norm, System.currentTimeMillis()))
         while (recentEchoes.size > maxEchoEntries) recentEchoes.poll()
-        Log.d(TAG, "ECHO_REGISTER len=${norm.length}")
+        logD("ECHO_REGISTER len=${norm.length}")
     }
 
     /**
@@ -47,14 +46,14 @@ class InputGuard(
         purgeOldEchoes(nowMs)
         for (echo in recentEchoes) {
             if (isSimilar(norm, echo.normalized)) {
-                Log.i(TAG, "DUPLICATE_BLOCKED reason=tts_echo input=$norm")
+                logI("DUPLICATE_BLOCKED reason=tts_echo input=$norm")
                 return "tts_echo"
             }
         }
 
         // Same command fired twice in a short window (double callback)
         if (norm == lastAcceptedNorm && nowMs - lastAcceptedAtMs < duplicateWindowMs) {
-            Log.i(TAG, "DUPLICATE_BLOCKED reason=repeat_window input=$norm")
+            logI("DUPLICATE_BLOCKED reason=repeat_window input=$norm")
             return "repeat_window"
         }
 
@@ -64,7 +63,7 @@ class InputGuard(
     fun markAccepted(raw: String, nowMs: Long = System.currentTimeMillis()) {
         lastAcceptedNorm = normalize(raw)
         lastAcceptedAtMs = nowMs
-        Log.i(TAG, "INPUT_ACCEPTED norm=$lastAcceptedNorm")
+        logI("INPUT_ACCEPTED norm=$lastAcceptedNorm")
     }
 
     fun normalize(text: String): String {
@@ -94,6 +93,14 @@ class InputGuard(
             if (nowMs - head.atMs <= echoWindowMs) break
             recentEchoes.poll()
         }
+    }
+
+    private fun logD(msg: String) {
+        try { android.util.Log.d(TAG, msg) } catch (_: Throwable) { /* JVM unit tests */ }
+    }
+
+    private fun logI(msg: String) {
+        try { android.util.Log.i(TAG, msg) } catch (_: Throwable) { /* JVM unit tests */ }
     }
 
     companion object {
