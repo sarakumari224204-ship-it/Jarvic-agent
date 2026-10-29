@@ -10,19 +10,34 @@ object MediaPlayIntent {
 
     data class Parsed(
         val kind: Kind,
+        /** Free-text query (song/artist). Empty for generic "gana chalao" / "ispe song lagao". */
         val query: String,
-        val mentionsYouTube: Boolean
+        val mentionsYouTube: Boolean,
+        /** True when user refers to current screen ("ispe", "yahan") rather than a titled track. */
+        val contextual: Boolean = false
     ) {
         fun toAgentObjective(): String {
-            val q = query.ifBlank { "songs" }
+            val q = when {
+                query.isNotBlank() -> query
+                contextual -> "popular songs"
+                else -> "songs"
+            }
             return when (kind) {
-                Kind.PLAY ->
-                    "Play on YouTube: search for \"$q\" and play the best matching song or video. " +
-                        "Steps: (1) if YouTube search bar or Search icon is visible, open search; " +
-                        "(2) type_text the query exactly; (3) press_enter; " +
-                        "(4) click the best matching result (prefer official/topic, not Shorts if avoidable); " +
-                        "(5) wait once if needed; (6) finish with short Hindi speech like \"Haan, gana chala diya.\" " +
-                        "Do not open other apps. Do not type chat messages. Do not loop. Prefer node_id."
+                Kind.PLAY -> buildString {
+                    append("Play music/video on YouTube. ")
+                    if (contextual) {
+                        append("User is referring to the CURRENT screen (ispe/yahan). ")
+                        append("If YouTube already shows search results or a playable video list, click a good matching result. ")
+                        append("Otherwise search for \"$q\". ")
+                    } else {
+                        append("Search for \"$q\" and play the best matching song or video. ")
+                    }
+                    append("Steps: (1) if search bar or Search icon is visible, open search; ")
+                    append("(2) type_text the query when searching; (3) press_enter or click Search; ")
+                    append("(4) click the best matching result (prefer official/topic, avoid random Shorts if possible); ")
+                    append("(5) wait once if needed; (6) finish with short Hindi like \"Haan, gana chala diya.\" ")
+                    append("Do not open other apps. Do not type chat messages. Do not loop. Prefer node_id.")
+                }
                 Kind.SEARCH_ONLY ->
                     "On YouTube only search for \"$q\" — show results, do NOT play or open a video. " +
                         "Open search if needed, type_text, press_enter, then finish with short Hindi like \"Search results aa gaye.\" " +
@@ -36,7 +51,9 @@ object MediaPlayIntent {
     private val PLAY_VERBS = listOf(
         "chalao", "chala do", "chala dena", "play karo", "play kardo", "play kar do",
         "play", "sunao", "suna do", "sunaao",
-        "चलाओ", "चला दो", "चला देना", "सुनाओ", "सुना दो"
+        "lagao", "laga do", "laga dena", "laga",
+        "चलाओ", "चला दो", "चला देना", "सुनाओ", "सुना दो",
+        "लगाओ", "लगा दो", "लगा देना"
     )
 
     private val SEARCH_VERBS = listOf(
@@ -45,8 +62,14 @@ object MediaPlayIntent {
     )
 
     private val SONG_MARKERS = listOf(
-        "gana", "gaana", "song", "music", "track", "audio",
-        "गाना", "गाने", "सॉन्ग", "म्यूजिक"
+        "gana", "gaana", "song", "music", "track", "audio", "video",
+        "गाना", "गाने", "सॉन्ग", "म्यूजिक", "वीडियो"
+    )
+
+    private val CONTEXT_MARKERS = listOf(
+        "ispe", "is pe", "ispar", "is par", "yahan", "yaha", "yahin",
+        "here", "this", "current",
+        "इसपे", "इस पर", "यहाँ", "यहां"
     )
 
     private val KNOWN_APP_NAMES = setOf(
@@ -74,26 +97,35 @@ object MediaPlayIntent {
         val hasSongWord = SONG_MARKERS.any { lower.contains(it) }
         val isPlay = PLAY_VERBS.any { lower.contains(it) }
         val isSearch = SEARCH_VERBS.any { lower.contains(it) }
+        val contextual = CONTEXT_MARKERS.any { lower.contains(it) }
 
         if (isSearch && !isPlay) {
             if (mentionsYt || hasSongWord) {
                 val q = extractQuery(raw, lower)
-                return Parsed(Kind.SEARCH_ONLY, q, mentionsYt)
+                return Parsed(Kind.SEARCH_ONLY, q, mentionsYt, contextual = false)
             }
         }
 
         if (isPlay) {
             val q = extractQuery(raw, lower)
             val titled = q.isNotBlank() && !isOnlyFillerQuery(q)
-            if (titled && isKnownAppName(q) && !hasSongWord) {
+            if (titled && isKnownAppName(q) && !hasSongWord && !contextual) {
                 return null
             }
-            if (mentionsYt || hasSongWord || titled) {
-                if (mentionsYt && !hasSongWord && !titled && isBareAppPlay(lower)) {
-                    return null
-                }
-                return Parsed(Kind.PLAY, q, mentionsYt)
+            if (mentionsYt && !hasSongWord && !titled && !contextual && isBareAppPlay(lower)) {
+                return null
             }
+            if (contextual && (hasSongWord || isPlay)) {
+                return Parsed(Kind.PLAY, q, mentionsYt, contextual = true)
+            }
+            if (mentionsYt || hasSongWord || titled) {
+                return Parsed(Kind.PLAY, q, mentionsYt, contextual = contextual)
+            }
+        }
+
+        if (contextual && hasSongWord) {
+            val q = extractQuery(raw, lower)
+            return Parsed(Kind.PLAY, q, mentionsYt, contextual = true)
         }
 
         return null
@@ -118,15 +150,24 @@ object MediaPlayIntent {
 
     private fun isOnlyFillerQuery(q: String): Boolean {
         val t = q.lowercase().trim()
-        return t in SONG_MARKERS || t in listOf("ka", "ki", "ke", "the", "a", "an", "some", "ek")
+        val fillers = SONG_MARKERS + CONTEXT_MARKERS + listOf(
+            "ka", "ki", "ke", "the", "a", "an", "some", "ek", "achha", "accha",
+            "acha", "sa", "si", "se", "good", "nice", "best", "koi", "any"
+        )
+        return t.isEmpty() || t.split(" ").all { it in fillers }
     }
 
     internal fun extractQuery(original: String, lower: String = normalize(original)): String {
         var work = original.trim()
-        for (m in YT_MARKERS + listOf("par", "pe", "on", "mein", "me", "in", "ko", "का", "की", "के", "पर", "पे", "में")) {
+        val stripWords = YT_MARKERS + CONTEXT_MARKERS + listOf(
+            "par", "pe", "on", "mein", "me", "in", "ko",
+            "का", "की", "के", "पर", "पे", "में",
+            "achha", "accha", "acha", "sa", "si", "se", "good", "nice", "best", "ek", "koi"
+        )
+        for (m in stripWords) {
             work = work.replace(Regex("(?i)\\b${Regex.escape(m)}\\b"), " ")
         }
-        for (m in listOf("यूट्यूब", "पर", "पे", "में", "को", "का", "की", "के")) {
+        for (m in listOf("यूट्यूब", "पर", "पे", "में", "को", "का", "की", "के", "इसपे", "यहाँ", "यहां")) {
             work = work.replace(m, " ")
         }
         val verbs = (PLAY_VERBS + SEARCH_VERBS).sortedByDescending { it.length }
@@ -136,7 +177,7 @@ object MediaPlayIntent {
         for (s in SONG_MARKERS) {
             work = work.replace(Regex("(?i)\\b${Regex.escape(s)}\\b"), " ")
         }
-        for (s in listOf("गाना", "गाने", "सॉन्ग")) {
+        for (s in listOf("गाना", "गाने", "सॉन्ग", "वीडियो")) {
             work = work.replace(s, " ")
         }
         work = work.replace(Regex("(?i)\\b(ka|ki|ke|the|a|an)\\b"), " ")
