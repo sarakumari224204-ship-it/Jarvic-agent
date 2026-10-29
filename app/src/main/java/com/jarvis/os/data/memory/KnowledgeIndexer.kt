@@ -83,16 +83,6 @@ class KnowledgeIndexer(
         return extracted
     }
 
-    fun looksLikeScannedOrImagePdf(bytes: ByteArray): Boolean {
-        if (bytes.size < 8) return true
-        val head = bytes.copyOfRange(0, minOf(5, bytes.size)).toString(Charsets.ISO_8859_1)
-        if (!head.startsWith("%PDF")) return false
-        val sample = bytes.toString(Charsets.ISO_8859_1)
-        val textOps = Regex("\\((?:\\\\.|[^\\)]){3,120}\\)").findAll(sample).count()
-        val hasImage = sample.contains("/Image") || sample.contains("/XObject")
-        return textOps < 3 && hasImage
-    }
-
     private suspend fun fetchUrl(url: String): String? {
         val uri = try {
             URI(url).toURL()
@@ -115,7 +105,7 @@ class KnowledgeIndexer(
             .replace(Regex("(?is)<style[^>]*>.*?</style>"), " ")
         val text = noScript.replace(Regex("<[^>]+>"), " ")
             .replace(Regex("&nbsp;|&#160;"), " ")
-            .replace(Regex("&amp;"), "&")
+            .replace(Regex("&"), "&")
             .replace(Regex("\\s+"), " ")
             .trim()
         if (text.length < 40) throw IllegalStateException("Empty or login-walled page")
@@ -165,5 +155,19 @@ class KnowledgeIndexer(
         private const val MAX_PDF_BYTES = 8_000_000
         private const val MAX_DOC_CHARS = 200_000
         private const val MAX_CHUNKS = 80
+
+        /**
+         * Production heuristic: image-heavy PDFs with almost no text operators
+         * are treated as scanned; OCR is not supported.
+         */
+        fun looksLikeScannedOrImagePdf(bytes: ByteArray): Boolean {
+            if (bytes.size < 8) return true
+            val head = bytes.copyOfRange(0, minOf(5, bytes.size)).toString(Charsets.ISO_8859_1)
+            if (!head.startsWith("%PDF")) return false
+            val sample = bytes.toString(Charsets.ISO_8859_1)
+            val textOps = Regex("\\((?:\\\\.|[^\\)]){3,120}\\)").findAll(sample).count()
+            val hasImage = sample.contains("/Image") || sample.contains("/XObject")
+            return textOps < 3 && hasImage
+        }
     }
 }

@@ -1,20 +1,11 @@
 package com.jarvis.os.domain.memory
 
+import com.jarvis.os.data.memory.KnowledgeIndexer
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PdfHeuristicTest {
-
-    private fun looksLikeScanned(bytes: ByteArray): Boolean {
-        if (bytes.size < 8) return true
-        val head = bytes.copyOfRange(0, minOf(5, bytes.size)).toString(Charsets.ISO_8859_1)
-        if (!head.startsWith("%PDF")) return false
-        val sample = bytes.toString(Charsets.ISO_8859_1)
-        val textOps = Regex("\\((?:\\\\.|[^\\)]){3,120}\\)").findAll(sample).count()
-        val hasImage = sample.contains("/Image") || sample.contains("/XObject")
-        return textOps < 3 && hasImage
-    }
 
     @Test
     fun imageOnlyPdfFlagged() {
@@ -22,7 +13,7 @@ class PdfHeuristicTest {
             "%PDF-1.4\n" +
                 "1 0 obj<< /Type /XObject /Subtype /Image >>endobj\n"
             ).toByteArray(Charsets.ISO_8859_1)
-        assertTrue(looksLikeScanned(fake))
+        assertTrue(KnowledgeIndexer.looksLikeScannedOrImagePdf(fake))
     }
 
     @Test
@@ -34,11 +25,11 @@ class PdfHeuristicTest {
                 "(Third text operator present) Tj\n" +
                 "(Fourth block of letters) Tj\n"
             ).toByteArray(Charsets.ISO_8859_1)
-        assertFalse(looksLikeScanned(fake))
+        assertFalse(KnowledgeIndexer.looksLikeScannedOrImagePdf(fake))
     }
 
     @Test
     fun tinyBufferTreatedAsScanned() {
-        assertTrue(looksLikeScanned(byteArrayOf(1, 2, 3)))
+        assertTrue(KnowledgeIndexer.looksLikeScannedOrImagePdf(byteArrayOf(1, 2, 3)))
     }
 }
