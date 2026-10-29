@@ -1,0 +1,51 @@
+name: Restore Full TaskEngine
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'restore/TaskEngine.part*'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Concatenate parts into TaskEngine.kt
+        run: |
+          set -euo pipefail
+          PARTS=(restore/TaskEngine.part0 restore/TaskEngine.part1 restore/TaskEngine.part2)
+          for p in "${PARTS[@]}"; do
+            test -f "$p" || { echo "missing $p"; exit 1; }
+          done
+          cat restore/TaskEngine.part0 restore/TaskEngine.part1 restore/TaskEngine.part2 > /tmp/TaskEngine.kt
+          LINES=$(wc -l < /tmp/TaskEngine.kt)
+          BYTES=$(wc -c < /tmp/TaskEngine.kt)
+          echo "Assembled lines=$LINES bytes=$BYTES"
+          grep -q 'MODE_SCREEN_READ' /tmp/TaskEngine.kt
+          grep -q 'MessageSendGuard' /tmp/TaskEngine.kt
+          grep -q 'buildScreenReadContext' /tmp/TaskEngine.kt
+          ! grep -q 'Agent loop incomplete' /tmp/TaskEngine.kt
+          ! grep -q 'PLACEHOLDER' /tmp/TaskEngine.kt
+          mkdir -p app/src/main/java/com/jarvis/os/domain/agent
+          cp /tmp/TaskEngine.kt app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+          sha256sum app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+
+      - name: Commit and push full TaskEngine
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/jarvis/os/domain/agent/TaskEngine.kt
+          if git diff --cached --quiet; then
+            echo "No change to commit"
+            exit 0
+          fi
+          git commit -m "Restore full TaskEngine + MODE_SCREEN_READ (assembled from parts)"
+          git push origin HEAD:main
