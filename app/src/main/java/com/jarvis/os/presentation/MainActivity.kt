@@ -87,7 +87,9 @@ class MainActivity : ComponentActivity() {
                     TeachSaraScreen(
                         snapshot = teachSnapshot,
                         searchHits = emptyList(),
-                        onSearch = { q -> container.memoryStore.search(q) },
+                        onSearch = { q ->
+                            lifecycleScope.launch { /* search handled in screen via callback result if needed */ }
+                        },
                         onSaveInstruction = { item ->
                             lifecycleScope.launch { container.memoryStore.upsertInstruction(item) }
                         },
@@ -100,79 +102,114 @@ class MainActivity : ComponentActivity() {
                         onDeleteMemory = { id ->
                             lifecycleScope.launch { container.memoryStore.deleteMemory(id) }
                         },
-                        onUpdateSettings = { settings ->
-                            lifecycleScope.launch { container.memoryStore.updateSettings(settings) }
+                        onClearMemories = {
+                            lifecycleScope.launch { container.memoryStore.clearMemories() }
                         },
-                        onUpdatePersonality = { p ->
-                            lifecycleScope.launch { container.memoryStore.updatePersonality(p) }
-                        },
-                        onImportDocument = { onUri ->
-                            pendingDocumentImport = onUri
-                            documentPicker.launch(arrayOf("application/pdf", "text/plain", "text/*"))
-                        },
-                        onImportUri = { uri, onDone ->
+                        onSaveKnowledgeNote = { title, text ->
                             lifecycleScope.launch {
-                                val result = DocumentImport.import(
-                                    this@MainActivity,
-                                    uri,
-                                    container.knowledgeIndexer,
-                                    container.memoryStore
-                                )
-                                onDone(result)
+                                container.knowledgeIndexer.indexPlainText(title, text)
                             }
                         },
-                        onBack = { showTeach = false }
+                        onSaveKnowledgeUrl = { title, url ->
+                            lifecycleScope.launch {
+                                container.knowledgeIndexer.indexUrl(title, url)
+                            }
+                        },
+                        onImportDocument = {
+                            pendingDocumentImport = { uri ->
+                                lifecycleScope.launch {
+                                    try {
+                                        val name = DocumentImport.displayName(this@MainActivity, uri)
+                                        val copied = DocumentImport.copyToAppStorage(this@MainActivity, uri, name)
+                                        if (copied != null) {
+                                            container.knowledgeIndexer.indexLocalFile(copied.displayName, copied.localPath, copied.type)
+                                            Toast.makeText(this@MainActivity, "Imported: ${copied.displayName}", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(this@MainActivity, "Import fail", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        Toast.makeText(this@MainActivity, "Import error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                            documentPicker.launch(arrayOf("application/pdf", "text/plain", "text/*"))
+                        },
+                        onDeleteKnowledge = { id ->
+                            lifecycleScope.launch { container.memoryStore.deleteKnowledge(id) }
+                        },
+                        onReindex = { id ->
+                            lifecycleScope.launch { container.knowledgeIndexer.reindex(id) }
+                        },
+                        onToggleMemoryEnabled = { enabled ->
+                            lifecycleScope.launch {
+                                val cur = container.memoryStore.current().settings
+                                container.memoryStore.updateSettings(cur.copy(enabled = enabled))
+                            }
+                        },
+                        onSavePersonality = { p ->
+                            lifecycleScope.launch { container.memoryStore.updatePersonality(p) }
+                        },
+                        onExport = {
+                            lifecycleScope.launch {
+                                val json = container.memoryStore.exportJson()
+                                val clip = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                                clip.setPrimaryClip(ClipData.newPlainText("sara-memory", json))
+                                Toast.makeText(this@MainActivity, "Exported to clipboard", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onClose = { showTeach = false }
                     )
                 } else {
                     JarvisHudScreen(
-                        agentStatus = container.runtime?.let { null } ?: run {
-                            val status by com.jarvis.os.runtime.JarvisRuntime.agentStatus.collectAsState()
-                            status
-                        },
-                        isListening = run {
-                            val v by com.jarvis.os.runtime.JarvisRuntime.isListening.collectAsState()
-                            v
-                        },
-                        partialSpeech = run {
-                            val v by com.jarvis.os.runtime.JarvisRuntime.partialSpeech.collectAsState()
-                            v
-                        },
-                        serviceRunning = run {
-                            val v by com.jarvis.os.runtime.JarvisRuntime.serviceRunning.collectAsState()
-                            v
-                        },
-                        apiSettings = apiSettings,
+                        settings = apiSettings,
                         aiMode = aiMode,
                         installedModelIds = installedModelIds,
                         selectedModelId = selectedModelId,
-                        downloadProgress = downloadProgress,
-                        accessibilityEnabled = JarvisAccessibilityService.isEnabled(this@MainActivity),
-                        onStartService = { maybeStartService() },
-                        onStopService = {
-                            stopService(Intent(this@MainActivity, JarvisForegroundService::class.java))
-                            com.jarvis.os.runtime.JarvisRuntime.setServiceRunning(false)
+                        downloadProgress = downloadProgress ?: ModelDownloadProgress(),
+                        freeSpaceLabel = {
+                            try {
+                                val bytes = container.offlineModelManager.freeSpaceBytes()
+                                val mb = bytes / (1024 * 1024)
+                                "$mb MB free"
+                            } catch (_: Exception) { "" }
                         },
-                        onOpenAccessibilitySettings = {
-                            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        onSaveGemini = { key, model ->
+                            lifecycleScope.launch { container.keyStore.saveGemini(key, model) }
                         },
-                        onSaveApiSettings = { s ->
-                            lifecycleScope.launch { container.keyStore.save(s) }
+                        onSaveEleven = { key, voiceId, model ->
+                            lifecycleScope.launch { container.keyStore.saveElevenLabs(key, voiceId, model) }
                         },
-                        onSetAiMode = { mode ->
-                            lifecycleScope.launch { container.keyStore.setAiMode(mode) }
+                        onSaveVoiceMode = { mode ->
+                            lifecycleScope.launch { container.keyStore.saveVoiceMode(mode) }
+                        },
+                        onSaveAiMode = { mode ->
+                            lifecycleScope.launch { container.keyStore.saveAiMode(mode) }
+                        },
+                        onOpenTeachSara = { showTeach = true },
+                        onDownloadModel = { id ->
+                            lifecycleScope.launch { container.offlineModelManager.downloadModel(id) }
+                        },
+                        onCancelDownload = {
+                            container.offlineModelManager.cancelDownload()
                         },
                         onSelectModel = { id ->
                             lifecycleScope.launch { container.offlineModelManager.selectModel(id) }
                         },
-                        onDownloadModel = { id ->
-                            lifecycleScope.launch { container.offlineModelManager.downloadModel(id) }
+                        onDeleteModel = { id ->
+                            lifecycleScope.launch { container.offlineModelManager.deleteModel(id) }
                         },
-                        onOpenTeachSara = { showTeach = true },
-                        onCopyLogs = {
-                            val clip = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                            clip.setPrimaryClip(ClipData.newPlainText("sara", "Sara AI logs"))
-                            Toast.makeText(this@MainActivity, "Copied", Toast.LENGTH_SHORT).show()
-                        }
+                        onOpenAccessibilitySettings = {
+                            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        },
+                        onOpenOverlaySettings = {
+                            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                        },
+                        onRequestPermissions = { ensurePermissions() },
+                        onStartListening = { maybeStartService() },
+                        onStopListening = {
+                            JarvisForegroundService.stop(this@MainActivity)
+                        },
+                        isAccessibilityEnabled = { JarvisAccessibilityService.isEnabled(this@MainActivity) }
                     )
                 }
             }
@@ -199,8 +236,7 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            val intent = Intent(this, JarvisForegroundService::class.java)
-            startForegroundService(intent)
+            JarvisForegroundService.start(this)
         }
     }
 }
