@@ -37,6 +37,8 @@ Rules:
 - YouTube music/play: search icon or search field → type_text query → press_enter → click best result → finish with short Hindi (e.g. "Haan, gana chala diya."). Never treat a song title as a chat message. Do not loop type_text.
 - YouTube search-only (no play): stop after results; do not click a video.
 - If YouTube is already on screen, do not open_app again.
+- If SCREEN says SCREEN_LOADING or EMPTY right after open_app, use wait once then continue. Do NOT fail claiming accessibility is disabled/restricted — the service is on; the window is still loading.
+- Only fail about accessibility if the user must enable the Sara AI accessibility service (service truly off). Temporary null root is not that case.
 """.trimIndent()
 
     fun userTurn(

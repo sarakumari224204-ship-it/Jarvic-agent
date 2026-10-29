@@ -1,10 +1,10 @@
 package com.jarvis.os.accessibility
 
-import android.graphics.Rect
-
-// ---------------------------------------------------------------------------
+/**
+ * Lightweight, serializable-friendly models that describe the on-screen UI tree.
+ * Kept free of Android framework types so unit tests can construct them easily.
+ */
 // Data models used by JarvisAccessibilityService and the TaskEngine
-// ---------------------------------------------------------------------------
 
 data class BoundsRect(
     val left: Int,
@@ -64,11 +64,17 @@ data class ScreenSnapshot(
     val height: Int,
     val nodes: List<ScreenNode>,
     val truncated: Boolean = false,
-    val blocked: Boolean = false
+    val blocked: Boolean = false,
+    /** Root was null after bounded retries — transient, not "a11y disabled". */
+    val rootUnavailable: Boolean = false
 ) {
     /** Compact text representation for the LLM prompt. */
     fun toPrompt(): String {
-        if (blocked) return "[BLOCKED] This package is not allowed."
+        if (rootUnavailable) {
+            return "[SCREEN_LOADING] Accessibility root not ready yet after app transition. " +
+                "Use action=wait once, then continue. Do NOT claim accessibility is disabled."
+        }
+        if (blocked) return "[BLOCKED] This package is not allowed for automation (privacy)."
         if (nodes.isEmpty()) return "[EMPTY] No readable nodes on screen (pkg=$packageName ${width}x$height)."
 
         return buildString {
