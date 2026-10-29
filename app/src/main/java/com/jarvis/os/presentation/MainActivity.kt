@@ -22,16 +22,19 @@ import androidx.lifecycle.lifecycleScope
 import com.jarvis.os.JarvisApp
 import com.jarvis.os.accessibility.JarvisAccessibilityService
 import com.jarvis.os.data.memory.DocumentImport
-import com.jarvis.os.data.memory.MemoryStore
+import com.jarvis.os.data.offline.ModelDownloadProgress
 import com.jarvis.os.domain.ai.AIMode
 import com.jarvis.os.domain.memory.KnowledgeItem
 import com.jarvis.os.domain.memory.KnowledgeType
 import com.jarvis.os.domain.memory.MemorySettings
+import com.jarvis.os.domain.memory.PersonalitySettings
 import com.jarvis.os.domain.model.ApiSettings
+import com.jarvis.os.domain.model.VoiceMode
 import com.jarvis.os.presentation.ui.JarvisHudScreen
 import com.jarvis.os.presentation.ui.JarvisTheme
 import com.jarvis.os.presentation.ui.TeachSaraScreen
 import com.jarvis.os.service.JarvisForegroundService
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -44,7 +47,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private var pendingDocumentImport: ((android.net.Uri) -> Unit)? = null
+    private var pendingDocumentImport: ((Uri) -> Unit)? = null
 
     private val documentPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -71,10 +74,11 @@ class MainActivity : ComponentActivity() {
         val container = app.container
 
         setContent {
-            val agentStatus by container.runtime.agentStatus.collectAsState()
             val apiSettings by container.keyStore.settings.collectAsState(initial = ApiSettings())
             val aiMode by container.keyStore.aiMode.collectAsState(initial = AIMode.AUTO)
-            val offlineModels by container.offlineModelManager.models.collectAsState()
+            val installedModelIds by container.offlineModelManager.installedModelIds.collectAsState(initial = emptySet())
+            val selectedModelId by container.offlineModelManager.selectedModelId.collectAsState(initial = null)
+            val downloadProgress by container.offlineModelManager.progress.collectAsState()
             val teachSnapshot by container.memoryStore.snapshot.collectAsState()
             var showTeach by remember { mutableStateOf(false) }
 
@@ -104,6 +108,7 @@ class MainActivity : ComponentActivity() {
                                 val item = KnowledgeItem(
                                     title = title.ifBlank { "Note" },
                                     type = KnowledgeType.TEXT,
+                                    source = "note",
                                     contentRef = text
                                 )
                                 container.memoryStore.upsertKnowledge(item)
@@ -115,11 +120,16 @@ class MainActivity : ComponentActivity() {
                                 val item = KnowledgeItem(
                                     title = title.ifBlank { url.take(40) },
                                     type = KnowledgeType.URL,
+                                    source = url,
                                     contentRef = url
                                 )
                                 container.memoryStore.upsertKnowledge(item)
                                 container.knowledgeIndexer.index(item).onFailure {
-                                    Toast.makeText(this@MainActivity, it.message ?: "Index fail", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        it.message ?: "Index fail",
+                                        Toast.LENGTH_LONG
+                                    ).show()
                                 }
                             }
                         },
@@ -132,20 +142,33 @@ class MainActivity : ComponentActivity() {
                                             val item = KnowledgeItem(
                                                 title = spec.displayName,
                                                 type = spec.type,
+                                                source = spec.localPath,
                                                 contentRef = spec.localPath
                                             )
                                             container.memoryStore.upsertKnowledge(item)
                                             container.knowledgeIndexer.index(item).fold(
                                                 onSuccess = { n ->
-                                                    Toast.makeText(this@MainActivity, "Indexed $n chunks", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "Indexed $n chunks",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
                                                 },
                                                 onFailure = { e ->
-                                                    Toast.makeText(this@MainActivity, e.message ?: "Index fail", Toast.LENGTH_LONG).show()
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        e.message ?: "Index fail",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
                                                 }
                                             )
                                         },
                                         onFailure = { e ->
-                                            Toast.makeText(this@MainActivity, e.message ?: "Import fail", Toast.LENGTH_LONG).show()
+                                            Toast.makeText(
+                                                this@MainActivity,
+                                                e.message ?: "Import fail",
+                                                Toast.LENGTH_LONG
+                                            ).show()
                                         }
                                     )
                                 }
@@ -163,37 +186,56 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleMemoryEnabled = { enabled ->
                             lifecycleScope.launch {
-                                container.memoryStore.updateSettings(MemorySettings(memoryEnabled = enabled))
+                                container.memoryStore.saveSettings(
+                                    MemorySettings(memoryEnabled = enabled)
+                                )
                             }
                         },
                         onSavePersonality = { p ->
-                            lifecycleScope.launch { container.memoryStore.updatePersonality(p) }
+                            lifecycleScope.launch { container.memoryStore.savePersonality(p) }
                         },
                         onExport = {
                             lifecycleScope.launch {
                                 val json = container.memoryStore.exportJson()
                                 val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                                 cm.setPrimaryClip(ClipData.newPlainText("teach_sara", json))
-                                Toast.makeText(this@MainActivity, "Exported to clipboard", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Exported to clipboard",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         },
                         onClose = { showTeach = false }
                     )
                 } else {
                     JarvisHudScreen(
-                        status = agentStatus,
-                        apiSettings = apiSettings,
+                        settings = apiSettings,
                         aiMode = aiMode,
-                        offlineModels = offlineModels,
-                        onSaveApiKey = { key ->
-                            lifecycleScope.launch { container.keyStore.setGeminiKey(key) }
+                        installedModelIds = installedModelIds,
+                        selectedModelId = selectedModelId,
+                        downloadProgress = downloadProgress,
+                        freeSpaceLabel = {
+                            val bytes = container.offlineModelManager.freeSpaceBytes()
+                            val mb = bytes / (1024 * 1024)
+                            if (mb >= 1024) String.format("%.1f GB free", mb / 1024.0)
+                            else "$mb MB free"
                         },
-                        onSaveModel = { model ->
-                            lifecycleScope.launch { container.keyStore.setGeminiModel(model) }
+                        onSaveGemini = { key, model ->
+                            lifecycleScope.launch { container.keyStore.saveGemini(key, model) }
                         },
-                        onSetAiMode = { mode ->
-                            lifecycleScope.launch { container.keyStore.setAiMode(mode) }
+                        onSaveEleven = { key, voiceId, model ->
+                            lifecycleScope.launch {
+                                container.keyStore.saveElevenLabs(key, voiceId, model)
+                            }
                         },
+                        onSaveVoiceMode = { mode ->
+                            lifecycleScope.launch { container.keyStore.saveVoiceMode(mode) }
+                        },
+                        onSaveAiMode = { mode ->
+                            lifecycleScope.launch { container.keyStore.saveAiMode(mode) }
+                        },
+                        onOpenTeachSara = { showTeach = true },
                         onDownloadModel = { id ->
                             lifecycleScope.launch { container.offlineModelManager.download(id) }
                         },
@@ -207,7 +249,6 @@ class MainActivity : ComponentActivity() {
                                 container.offlineModelManager.deleteModel(id)
                             }
                         },
-                        onOpenTeachSara = { showTeach = true },
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
@@ -222,7 +263,9 @@ class MainActivity : ComponentActivity() {
                         onRequestPermissions = { requestNeededPermissions() },
                         onStartListening = { maybeStartService() },
                         onStopListening = { JarvisForegroundService.stop(this@MainActivity) },
-                        isAccessibilityEnabled = { JarvisAccessibilityService.isEnabled(this@MainActivity) }
+                        isAccessibilityEnabled = {
+                            JarvisAccessibilityService.isEnabled(this@MainActivity)
+                        }
                     )
                 }
             }

@@ -3,12 +3,29 @@ package com.jarvis.os.presentation.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -16,11 +33,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.jarvis.os.data.memory.MemoryStore
 import com.jarvis.os.domain.memory.KnowledgeItem
-import com.jarvis.os.domain.memory.KnowledgeType
 import com.jarvis.os.domain.memory.MemoryCategory
+import com.jarvis.os.domain.memory.MemorySettings
 import com.jarvis.os.domain.memory.PersonalitySettings
 import com.jarvis.os.domain.memory.SaraInstruction
 import com.jarvis.os.domain.memory.SaraMemory
@@ -29,12 +45,8 @@ import com.jarvis.os.domain.memory.TeachSnapshot
 
 enum class TeachTab { INSTRUCTIONS, MEMORY, KNOWLEDGE, SEARCH, SETTINGS, TEACH }
 
-private val JarvisBackground = Color(0xFF0B0F1A)
-private val JarvisSurface = Color(0xFF121826)
-private val JarvisCyan = Color(0xFF00E5FF)
-private val JarvisMuted = Color(0xFF8B9BB4)
-private val JarvisOnSurface = Color(0xFFE8EEF7)
-private val JarvisDanger = Color(0xFFFF6B6B)
+// Reuse Theme.kt colors; local aliases only where needed for private scope
+private val TeachDanger = Color(0xFFFF6B6B)
 
 @Composable
 fun TeachSaraScreen(
@@ -91,7 +103,10 @@ fun TeachSaraScreen(
         )
 
         Spacer(modifier = Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
             TeachTab.entries.forEach { t ->
                 val selected = tab == t
                 Text(
@@ -108,7 +123,11 @@ fun TeachSaraScreen(
                     fontSize = 11.sp,
                     modifier = Modifier
                         .clickable { tab = t }
-                        .border(1.dp, if (selected) JarvisCyan else JarvisMuted.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                        .border(
+                            1.dp,
+                            if (selected) JarvisCyan else JarvisMuted.copy(alpha = 0.3f),
+                            RoundedCornerShape(4.dp)
+                        )
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
             }
@@ -172,7 +191,12 @@ private fun TeachTabContent(
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         SmallBtn("As Rule") {
             if (text.isNotBlank()) {
-                onSaveInstruction(SaraInstruction(text = text.trim()))
+                onSaveInstruction(
+                    SaraInstruction(
+                        title = text.trim().take(40),
+                        text = text.trim()
+                    )
+                )
                 text = ""
             }
         }
@@ -203,7 +227,12 @@ private fun InstructionsSection(
     TeachField("New rule", draft) { draft = it }
     SmallBtn("Add Rule") {
         if (draft.isNotBlank()) {
-            onSave(SaraInstruction(text = draft.trim()))
+            onSave(
+                SaraInstruction(
+                    title = draft.trim().take(40),
+                    text = draft.trim()
+                )
+            )
             draft = ""
         }
     }
@@ -217,9 +246,14 @@ private fun InstructionsSection(
                 .padding(8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(item.text.take(120), color = JarvisOnSurface, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text(
+                item.text.take(120),
+                color = JarvisOnSurface,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f)
+            )
             TextButton(onClick = { onDelete(item.id) }) {
-                Text("Del", color = JarvisDanger, fontSize = 11.sp)
+                Text("Del", color = TeachDanger, fontSize = 11.sp)
             }
         }
     }
@@ -260,7 +294,7 @@ private fun MemorySection(
                 Text(item.category.name, color = JarvisMuted, fontSize = 10.sp)
             }
             TextButton(onClick = { onDelete(item.id) }) {
-                Text("Del", color = JarvisDanger, fontSize = 11.sp)
+                Text("Del", color = TeachDanger, fontSize = 11.sp)
             }
         }
     }
@@ -325,7 +359,7 @@ private fun KnowledgeSection(
                     Text("Re", color = JarvisCyan, fontSize = 11.sp)
                 }
                 TextButton(onClick = { onDelete(item.id) }) {
-                    Text("Del", color = JarvisDanger, fontSize = 11.sp)
+                    Text("Del", color = TeachDanger, fontSize = 11.sp)
                 }
             }
         }
@@ -356,7 +390,7 @@ private fun SearchSection(
 
 @Composable
 private fun SettingsSection(
-    settings: com.jarvis.os.domain.memory.MemorySettings,
+    settings: MemorySettings,
     personality: PersonalitySettings,
     onToggleMemory: (Boolean) -> Unit,
     onSavePersonality: (PersonalitySettings) -> Unit,
@@ -365,7 +399,12 @@ private fun SettingsSection(
     Text("Settings", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
     Spacer(modifier = Modifier.height(8.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("Memory enabled", color = JarvisOnSurface, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Text(
+            "Memory enabled",
+            color = JarvisOnSurface,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f)
+        )
         Switch(checked = settings.memoryEnabled, onCheckedChange = onToggleMemory)
     }
     Spacer(modifier = Modifier.height(8.dp))
@@ -380,7 +419,10 @@ private fun SettingsSection(
 private fun SmallBtn(label: String, onClick: () -> Unit) {
     Button(
         onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurface, contentColor = JarvisCyan),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = JarvisSurface,
+            contentColor = JarvisCyan
+        ),
         shape = RoundedCornerShape(6.dp),
         modifier = Modifier.padding(vertical = 4.dp)
     ) {
