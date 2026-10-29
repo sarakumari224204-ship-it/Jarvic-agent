@@ -61,12 +61,6 @@ class JarvisAccessibilityService : AccessibilityService() {
         nodeRefs = emptyMap()
     }
 
-    /**
-     * Capture the active window hierarchy.
-     * Distinguishes: transient root unavailability (loading) vs hard blocked packages.
-     * Retries across app transitions so a temporary null root is not reported as
-     * "accessibility disabled/restricted".
-     */
     suspend fun inspectScreen(
         timeoutMs: Long = INSPECT_TIMEOUT_MS
     ): ScreenSnapshot = withContext(Dispatchers.Default) {
@@ -81,7 +75,6 @@ class JarvisAccessibilityService : AccessibilityService() {
                 continue
             }
             val pkg = root.packageName?.toString()
-            // Self / system UI during transition — wait for the real target window
             if (pkg != null && pkg in blockedPackages) {
                 lastBlockedPkg = pkg
                 delay(ROOT_RETRY_DELAY_MS)
@@ -228,16 +221,33 @@ class JarvisAccessibilityService : AccessibilityService() {
         blockedResult()?.let { return@withContext it }
         val node = resolveEditable(nodeId)
         if (node != null && node.refresh()) {
-            val args = Bundle().apply {
-                putInt(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
-                    AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE
-                )
-                putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (node.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)) {
+                    return@withContext ActionResult.ok("IME enter")
+                }
             }
-            node.performAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY, args)
+            if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return@withContext ActionResult.ok("Enter via field click")
+            }
         }
-        ActionResult.ok("Enter")
+        val searchHit = nodeRefs.entries.firstOrNull { (_, n) ->
+            if (!n.refresh()) return@firstOrNull false
+            if (!n.isClickable && !n.isEnabled) return@firstOrNull false
+            val blob = listOfNotNull(
+                n.text?.toString(),
+                n.contentDescription?.toString(),
+                n.viewIdResourceName
+            ).joinToString(" ").lowercase()
+            blob.contains("search") || blob.contains("go") || blob.contains("enter") ||
+                blob.contains("खोज") || blob.contains("जाएँ") || blob.contains("ime_action")
+        }
+        if (searchHit != null) {
+            val n = searchHit.value
+            if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return@withContext ActionResult.ok("Clicked search control ${searchHit.key}")
+            }
+        }
+        ActionResult.ok("Enter attempted")
     }
 
     private fun resolveEditable(nodeId: Int?): AccessibilityNodeInfo? {
@@ -279,7 +289,6 @@ class JarvisAccessibilityService : AccessibilityService() {
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long = SWIPE_MS): ActionResult {
         blockedResult()?.let { return it }
         checkPoint(x1, y1)?.let { return it }
-        checkPoint(x2, y2)?.let { return it }
         val path = Path().apply {
             moveTo(x1.toFloat(), y1.toFloat())
             lineTo(x2.toFloat(), y2.toFloat())
