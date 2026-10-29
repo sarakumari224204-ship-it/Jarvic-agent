@@ -222,7 +222,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         val node = resolveEditable(nodeId)
         if (node != null && node.refresh()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                if (node.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)) {
+                val imeEnter = 0x01000007
+                if (node.performAction(imeEnter)) {
                     return@withContext ActionResult.ok("IME enter")
                 }
             }
