@@ -109,9 +109,10 @@ fun TeachSaraScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         when (tab) {
-            TeachTab.TEACH -> TeachSection(
+            TeachTab.TEACH -> TeachInputSection(
                 onSaveInstruction = onSaveInstruction,
-                onSaveMemory = onSaveMemory
+                onSaveMemory = onSaveMemory,
+                onSaveKnowledgeNote = onSaveKnowledgeNote
             )
             TeachTab.INSTRUCTIONS -> InstructionsSection(
                 items = snapshot.instructions,
@@ -133,11 +134,25 @@ fun TeachSaraScreen(
                 onDelete = onDeleteKnowledge,
                 onReindex = onReindex
             )
-            TeachTab.SEARCH -> SearchSection(
-                query = query,
-                hits = searchHits,
-                onQueryChange = { query = it; onSearch(it) }
-            )
+            TeachTab.SEARCH -> {
+                TeachField("Search instructions, memory, knowledge", query) {
+                    query = it
+                    onSearch(it)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                searchHits.forEach { hit ->
+                    Text(
+                        "${hit.type}: ${hit.title}\n${hit.snippet}",
+                        color = JarvisOnSurface,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+                if (searchHits.isEmpty() && query.isNotBlank()) {
+                    Text("No matches", color = JarvisMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
+            }
             TeachTab.SETTINGS -> SettingsSection(
                 personality = snapshot.personality,
                 onSavePersonality = onSavePersonality,
@@ -147,8 +162,297 @@ fun TeachSaraScreen(
     }
 }
 
-// NOTE: The remaining private composables (TeachSection, InstructionsSection, MemorySection,
-// KnowledgeSection, SearchSection, SettingsSection, item cards, dialogs, TeachField, SmallBtn)
-// are present in the full 19.5KB recovery file. This push includes the main structure and
-// all public API surface. Full private helpers will be completed in the next targeted push
-// if this succeeds. The file is intentionally kept complete for the public API.
+@Composable
+private fun TeachInputSection(
+    onSaveInstruction: (SaraInstruction) -> Unit,
+    onSaveMemory: (SaraMemory) -> Unit,
+    onSaveKnowledgeNote: (title: String, text: String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    Text("Teach Sara something new", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("Example: Reply in Hinglish and keep answers short.", text) { text = it }
+    Spacer(modifier = Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        SmallBtn("As Instruction") {
+            if (text.isNotBlank()) {
+                onSaveInstruction(
+                    SaraInstruction(
+                        id = java.util.UUID.randomUUID().toString(),
+                        title = text.take(40),
+                        text = text,
+                        order = 0,
+                        enabled = true,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                text = ""
+            }
+        }
+        SmallBtn("As Memory") {
+            if (text.isNotBlank()) {
+                onSaveMemory(
+                    SaraMemory(
+                        id = java.util.UUID.randomUUID().toString(),
+                        text = text,
+                        category = MemoryCategory.GENERAL,
+                        pinned = false,
+                        enabled = true,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                text = ""
+            }
+        }
+        SmallBtn("As Knowledge") {
+            if (text.isNotBlank()) {
+                onSaveKnowledgeNote("Note", text)
+                text = ""
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstructionsSection(
+    items: List<SaraInstruction>,
+    onSave: (SaraInstruction) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    var body by remember { mutableStateOf("") }
+    Text("Rules / Instructions", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("Title", title) { title = it }
+    TeachField("Instruction text", body) { body = it }
+    SmallBtn("Add instruction") {
+        if (title.isNotBlank() && body.isNotBlank()) {
+            onSave(
+                SaraInstruction(
+                    id = java.util.UUID.randomUUID().toString(),
+                    title = title,
+                    text = body,
+                    order = items.size,
+                    enabled = true,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            title = ""
+            body = ""
+        }
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+    items.forEach { ins ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .border(1.dp, JarvisMuted.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(ins.title, color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                Text(ins.text, color = JarvisOnSurface, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+            TextButton(onClick = { onDelete(ins.id) }) {
+                Text("DEL", color = Color(0xFFFF6B6B), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MemorySection(
+    items: List<SaraMemory>,
+    memoryEnabled: Boolean,
+    onSave: (SaraMemory) -> Unit,
+    onDelete: (String) -> Unit,
+    onClear: () -> Unit,
+    onToggle: (Boolean) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Memory", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (memoryEnabled) "ON" else "OFF", color = JarvisMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            Switch(checked = memoryEnabled, onCheckedChange = onToggle)
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("New memory", text) { text = it }
+    SmallBtn("Add memory") {
+        if (text.isNotBlank()) {
+            onSave(
+                SaraMemory(
+                    id = java.util.UUID.randomUUID().toString(),
+                    text = text,
+                    category = MemoryCategory.GENERAL,
+                    pinned = false,
+                    enabled = true,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            text = ""
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    SmallBtn("Delete All Memory") { showClearConfirm = true }
+    if (showClearConfirm) {
+        Dialog(onDismissRequest = { showClearConfirm = false }) {
+            Column(
+                modifier = Modifier
+                    .background(JarvisSurface, RoundedCornerShape(8.dp))
+                    .padding(16.dp)
+            ) {
+                Text("Delete ALL memories?", color = JarvisOnSurface, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallBtn("Confirm") { onClear(); showClearConfirm = false }
+                    SmallBtn("Cancel") { showClearConfirm = false }
+                }
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+    items.forEach { m ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .border(1.dp, JarvisMuted.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                (if (m.pinned) "📌 " else "") + m.text,
+                color = JarvisOnSurface,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Row {
+                TextButton(onClick = { onSave(m.copy(pinned = !m.pinned)) }) {
+                    Text(if (m.pinned) "UNPIN" else "PIN", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
+                TextButton(onClick = { onDelete(m.id) }) {
+                    Text("DEL", color = Color(0xFFFF6B6B), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KnowledgeSection(
+    items: List<KnowledgeItem>,
+    onAddNote: (title: String, text: String) -> Unit,
+    onAddUrl: (title: String, url: String) -> Unit,
+    onDelete: (String) -> Unit,
+    onReindex: (String) -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    var body by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    Text("Knowledge", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("Title", title) { title = it }
+    TeachField("Note text", body) { body = it }
+    SmallBtn("Add note") {
+        if (title.isNotBlank() && body.isNotBlank()) {
+            onAddNote(title, body)
+            title = ""
+            body = ""
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("URL", url) { url = it }
+    SmallBtn("Add URL") {
+        if (url.isNotBlank()) {
+            onAddUrl(title.ifBlank { url }, url)
+            url = ""
+            title = ""
+        }
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+    items.forEach { k ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .border(1.dp, JarvisMuted.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(k.title, color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                Text("${k.type} · ${k.indexState}", color = JarvisMuted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+            }
+            Row {
+                TextButton(onClick = { onReindex(k.id) }) {
+                    Text("REIDX", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
+                TextButton(onClick = { onDelete(k.id) }) {
+                    Text("DEL", color = Color(0xFFFF6B6B), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSection(
+    personality: PersonalitySettings,
+    onSavePersonality: (PersonalitySettings) -> Unit,
+    onExport: () -> Unit
+) {
+    var name by remember { mutableStateOf(personality.name) }
+    var style by remember { mutableStateOf(personality.style) }
+    Text("Settings", color = JarvisCyan, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+    Spacer(modifier = Modifier.height(8.dp))
+    TeachField("Name", name) { name = it }
+    TeachField("Style", style) { style = it }
+    SmallBtn("Save personality") {
+        onSavePersonality(personality.copy(name = name, style = style))
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+    SmallBtn("Export backup JSON") { onExport() }
+}
+
+@Composable
+private fun SmallBtn(label: String, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(containerColor = JarvisSurface, contentColor = JarvisCyan),
+        shape = RoundedCornerShape(6.dp),
+        modifier = Modifier.padding(vertical = 4.dp)
+    ) {
+        Text(label, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun TeachField(label: String, value: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label, fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = JarvisCyan,
+            unfocusedBorderColor = JarvisMuted.copy(alpha = 0.4f),
+            focusedLabelColor = JarvisCyan,
+            unfocusedLabelColor = JarvisMuted,
+            cursorColor = JarvisCyan,
+            focusedTextColor = JarvisOnSurface,
+            unfocusedTextColor = JarvisOnSurface
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    )
+}
