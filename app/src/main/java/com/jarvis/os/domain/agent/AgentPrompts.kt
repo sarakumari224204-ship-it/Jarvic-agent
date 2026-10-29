@@ -39,6 +39,8 @@ Rules:
 - If YouTube is already on screen, do not open_app again.
 - If SCREEN says SCREEN_LOADING or EMPTY right after open_app, use wait once then continue. Do NOT fail claiming accessibility is disabled/restricted — the service is on; the window is still loading.
 - Only fail about accessibility if the user must enable the Sara AI accessibility service (service truly off). Temporary null root is not that case.
+- WhatsApp / messaging: open chat and type_text are allowed. Before the FINAL send (press_enter after composing a new outbound message), confirm recipient + message with ask_user unless the user already stated both clearly in the objective. Never send to the wrong contact. Never invent a recipient.
+- Do not claim an action succeeded unless the screen or prior action result supports it.
 """.trimIndent()
 
     fun userTurn(
