@@ -80,4 +80,18 @@ class IntentClassifierTest {
         val c = IntentClassifier.classify("WhatsApp par message karo")
         assertEquals(IntentClassifier.Kind.DEVICE_ACTION, c.kind)
     }
+
+    @Test
+    fun screenParKyaHaiIsScreenRead() {
+        assertTrue(IntentClassifier.isScreenReadQuery("screen par kya hai"))
+        assertTrue(IntentClassifier.isScreenReadQuery("Screen pe kya dikh raha hai?"))
+        assertTrue(IntentClassifier.isScreenReadQuery("what's on my screen"))
+        assertEquals(IntentClassifier.Kind.SCREEN_READ, IntentClassifier.classify("screen par kya hai").kind)
+    }
+
+    @Test
+    fun youtubeKholoIsNotScreenRead() {
+        assertFalse(IntentClassifier.isScreenReadQuery("YouTube kholo"))
+        assertFalse(IntentClassifier.isScreenReadQuery("screen par like karo"))
+    }
 }

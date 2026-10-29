@@ -11,6 +11,7 @@ object IntentClassifier {
         MEDIA_PLAY,
         MEMORY_OP,
         DOCUMENT_QA,
+        SCREEN_READ,
         CONVERSATION,
         AMBIGUOUS
     }
@@ -45,6 +46,10 @@ object IntentClassifier {
         val text = raw.trim()
         if (text.isEmpty()) return Classification(Kind.CONVERSATION, 0.2f, "empty")
 
+        if (isScreenReadQuery(text)) {
+            return Classification(Kind.SCREEN_READ, 0.9f, "screen_read")
+        }
+
         if (MediaPlayIntent.isMediaCommand(text)) {
             return Classification(Kind.MEDIA_PLAY, 0.95f, "media_play_intent")
         }
@@ -76,6 +81,26 @@ object IntentClassifier {
         }
 
         return Classification(Kind.CONVERSATION, 0.55f, "default_chat")
+    }
+
+    /** True when the user is asking what is currently visible on the screen (not a device action). */
+    fun isScreenReadQuery(raw: String): Boolean {
+        val lower = raw.trim().lowercase()
+        if (lower.isEmpty()) return false
+        val screenTokens = listOf(
+            "screen", "screen par", "screen pe", "screen pe kya", "screen par kya",
+            "display", "dikha", "dikh raha", "dikh rahi", "dikh rahe", "kya dikh",
+            "kya hai screen", "screen kya", "what's on screen", "what is on screen",
+            "whats on screen", "on my screen", "mere screen", "abhi screen",
+            "स्क्रीन", "स्क्रीन पर", "क्या दिख", "स्क्रीन पे"
+        )
+        val hasScreen = screenTokens.any { lower.contains(it) }
+        if (!hasScreen) return false
+        val actionVerbs = listOf("kholo", "open", "click", "tap", "scroll", "type", "bhejo", "send", "like karo")
+        if (actionVerbs.any { lower.contains(it) } && !lower.contains("kya") && !lower.contains("what")) {
+            return false
+        }
+        return true
     }
 
     fun isDeviceLike(raw: String): Boolean {
