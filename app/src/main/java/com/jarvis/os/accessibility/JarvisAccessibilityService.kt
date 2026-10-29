@@ -411,26 +411,43 @@ class JarvisAccessibilityService : AccessibilityService() {
         return activeRoot() != null
     }
 
-    suspend fun launchApp(query: String): ActionResult = withContext(Dispatchers.Default) {
-        blockedResult()?.let { return@withContext it }
-        val app = resolveApp(query) ?: return@withContext ActionResult.fail("App not found: $query")
+    suspend fun launchApp(nameOrPackage: String): ActionResult = withContext(Dispatchers.Default) {
+        // Do NOT call blockedResult() here: when Sara is in the foreground its own package
+        // is in blockedPackages, which would incorrectly prevent launching any other app
+        // (regression: "YouTube kholo" failed while Sara was open). Only the *target*
+        // package is checked below.
+        val app = resolveApp(nameOrPackage)
+            ?: return@withContext ActionResult.fail(
+                "\"$nameOrPackage\" install nahi hai ya match nahi mila."
+            )
         if (app.packageName in blockedPackages) {
-            return@withContext ActionResult.fail("Blocked: JARVIS is not allowed to operate ${app.packageName}.")
+            return@withContext ActionResult.fail("Blocked: JARVIS is not allowed to open ${app.label}.")
         }
+
         val intent = packageManager.getLaunchIntentForPackage(app.packageName)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-            ?: Intent().setClassName(app.packageName, app.activityName)
+            ?: Intent(Intent.ACTION_MAIN)
+                .addCategory(Intent.CATEGORY_LAUNCHER)
+                .setClassName(app.packageName, app.activityName)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        return@withContext try {
+
+        val failure: ActionResult? = try {
             startActivity(intent)
+            null
+        } catch (e: ActivityNotFoundException) {
+            ActionResult.fail("${app.label} has no launchable screen.")
+        } catch (e: SecurityException) {
+            ActionResult.fail("Android refused to open ${app.label}.")
+        } catch (e: Exception) {
+            ActionResult.fail("${app.label} open nahi ho paya.")
+        }
+        if (failure != null) return@withContext failure
+
+        if (awaitForegroundPackage(app.packageName, LAUNCH_TIMEOUT_MS)) {
+            ActionResult.ok("Opened ${app.label}")
+        } else {
             awaitRootReady(ROOT_WAIT_TIMEOUT_MS)
             ActionResult.ok("Opened ${app.label}")
-        } catch (e: ActivityNotFoundException) {
-            ActionResult.fail("Could not launch ${app.label}")
-        } catch (e: SecurityException) {
-            ActionResult.fail("Permission denied launching ${app.label}")
-        } catch (e: Exception) {
-            ActionResult.fail("Launch failed: ${e.message}")
         }
     }
 
@@ -477,6 +494,15 @@ class JarvisAccessibilityService : AccessibilityService() {
             delay(ROOT_RETRY_DELAY_MS)
         }
         return null
+    }
+
+    suspend fun awaitForegroundPackage(pkg: String, timeoutMs: Long): Boolean {
+        val start = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - start < timeoutMs) {
+            if (currentPackage() == pkg) return true
+            delay(150L)
+        }
+        return currentPackage() == pkg
     }
 
     suspend fun awaitRootReady(timeoutMs: Long = ROOT_WAIT_TIMEOUT_MS): Boolean {
